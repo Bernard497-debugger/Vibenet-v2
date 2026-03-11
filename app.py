@@ -1,4 +1,5 @@
 # app.py - VibeNet  (SQLAlchemy ORM  |  SQLite locally  |  PostgreSQL on Render)
+print("==> app.py starting...", flush=True)
 import os
 import uuid
 import datetime
@@ -8,8 +9,6 @@ from flask import Flask, request, jsonify, send_from_directory, session, render_
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func
 
-import base64
-import requests as _requests
 
 # ---------- Config ----------
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -21,69 +20,7 @@ app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
 app.config["PORT"] = int(os.environ.get("PORT", 5000))
 app.secret_key = os.environ.get("SECRET_KEY", "vibenet_secret_dev")
 
-# Orange Money Web Payment
-OM_ENVIRONMENT  = os.environ.get("OM_ENVIRONMENT", "sandbox")   # "sandbox" or "production"
-OM_CLIENT_ID    = os.environ.get("OM_CLIENT_ID", "")
-OM_CLIENT_SECRET= os.environ.get("OM_CLIENT_SECRET", "")
-OM_COUNTRY_CODE = os.environ.get("OM_COUNTRY_CODE", "BW")       # BW = Botswana
-OM_CURRENCY     = os.environ.get("OM_CURRENCY", "BWP")          # Botswana Pula
-# Merchant's own Orange Money account number (required by the API)
-OM_MERCHANT_KEY = os.environ.get("OM_MERCHANT_KEY", "")         # notifyUrl secret key
 
-OM_BASE_URL = (
-    "https://api.orange.com/orange-money-webpay/dev/v1"
-    if OM_ENVIRONMENT != "production"
-    else "https://api.orange.com/orange-money-webpay/v1"
-)
-OM_TOKEN_URL = "https://api.orange.com/oauth/v3/token"
-
-_om_token_cache = {"token": None, "expires_at": 0}
-
-def _om_ok():
-    return bool(OM_CLIENT_ID) and bool(OM_CLIENT_SECRET)
-
-def _om_get_token():
-    """Fetch (or return cached) OAuth2 Bearer token."""
-    import time
-    now = time.time()
-    if _om_token_cache["token"] and now < _om_token_cache["expires_at"] - 30:
-        return _om_token_cache["token"]
-    creds   = base64.b64encode(f"{OM_CLIENT_ID}:{OM_CLIENT_SECRET}".encode()).decode()
-    headers = {
-        "Authorization": f"Basic {creds}",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "application/json",
-    }
-    r = _requests.post(OM_TOKEN_URL, headers=headers,
-                       data="grant_type=client_credentials", timeout=15)
-    j = r.json()
-    token = j.get("access_token")
-    expires_in = int(j.get("expires_in", 3600))
-    _om_token_cache["token"]      = token
-    _om_token_cache["expires_at"] = now + expires_in
-    return token
-
-def om_post(path: str, data: dict):
-    token   = _om_get_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
-        "Accept":        "application/json",
-    }
-    r = _requests.post(OM_BASE_URL + path, headers=headers,
-                       json=data, timeout=15)
-    return r.json(), r.status_code
-
-def om_get(path: str):
-    token   = _om_get_token()
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    r = _requests.get(OM_BASE_URL + path, headers=headers, timeout=15)
-    return r.json(), r.status_code
-
-# Pricing (USD)
-PRICE_VERIFIED_USD = 9.99   # $9.99 / month — VibeNet Verified badge
-PRICE_AD_CPM_USD   = 5.00   # $5.00 per 1,000 impressions
-PRICE_TIP_MIN_USD  = 1.00   # $1.00 minimum tip
 
 # SQLAlchemy: prefer DATABASE_URL env var (Render PostgreSQL), fall back to SQLite
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -96,13 +33,18 @@ app.config["SQLALCHEMY_DATABASE_URI"] = (
 )
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
-    "pool_recycle": 280,   # keep Render/Postgres connections alive
+    "pool_recycle": 280,
     "pool_pre_ping": True,
+    "connect_args": {"connect_timeout": 10} if not os.environ.get("DATABASE_URL", "").startswith("sqlite") else {},
 }
 
 os.makedirs(os.path.join(APP_DIR, "data"), exist_ok=True)
 
 db = SQLAlchemy(app)
+
+# ---------- Utilities ----------
+def now_ts():
+    return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
 # ---------- Models ----------
 
@@ -117,7 +59,8 @@ class User(db.Model):
     watch_hours       = db.Column(db.Integer, default=0)
     earnings          = db.Column(db.Float, default=0.0)
     verified          = db.Column(db.Integer, default=0)   # 1 = VibeNet Verified
-    yc_customer       = db.Column(db.Text, default="")     # Yellow Card customer ref
+    banned            = db.Column(db.Integer, default=0)   # 1 = banned
+    last_active       = db.Column(db.Text, default=lambda: now_ts())
     created_at        = db.Column(db.Text, default=lambda: now_ts())
 
     def to_dict(self):
@@ -125,7 +68,7 @@ class User(db.Model):
             "id": self.id, "name": self.name, "email": self.email,
             "profile_pic": self.profile_pic, "bio": self.bio,
             "watch_hours": self.watch_hours, "earnings": self.earnings,
-            "verified": bool(self.verified),
+            "verified": bool(self.verified), "banned": bool(self.banned),
         }
 
 
@@ -196,53 +139,83 @@ class Notification(db.Model):
 
 class Ad(db.Model):
     __tablename__ = "ads"
-    id          = db.Column(db.Integer, primary_key=True)
-    title       = db.Column(db.Text)
-    owner_email = db.Column(db.Text)
-    budget      = db.Column(db.Float, default=0.0)
-    impressions = db.Column(db.Integer, default=0)
-    clicks      = db.Column(db.Integer, default=0)
-    created_at  = db.Column(db.Text, default=lambda: now_ts())
+    id               = db.Column(db.Integer, primary_key=True)
+    title            = db.Column(db.Text)
+    owner_email      = db.Column(db.Text)
+    whatsapp_number  = db.Column(db.Text, default="")
+    budget           = db.Column(db.Float, default=0.0)
+    impressions      = db.Column(db.Integer, default=0)
+    clicks           = db.Column(db.Integer, default=0)
+    approved         = db.Column(db.Integer, default=0)
+    created_at       = db.Column(db.Text, default=lambda: now_ts())
 
     def to_dict(self):
         return {
             "id": self.id, "title": self.title, "owner_email": self.owner_email,
+            "whatsapp_number": self.whatsapp_number or "",
             "budget": self.budget, "impressions": self.impressions, "clicks": self.clicks,
+            "approved": self.approved, "created_at": self.created_at,
         }
 
 
-class Payment(db.Model):
-    __tablename__ = "payments"
-    id              = db.Column(db.Integer, primary_key=True)
-    payer_email     = db.Column(db.Text, nullable=False)
-    recipient_email = db.Column(db.Text, default="")   # empty = platform (verified/ads)
-    amount_cents    = db.Column(db.Integer, nullable=False)
-    currency        = db.Column(db.Text, default="usd")
-    payment_type    = db.Column(db.Text, nullable=False)  # tip | ad | verified
-    om_order_id     = db.Column(db.Text, default="")   # Orange Money order ID
-    om_reference    = db.Column(db.Text, default="")   # Orange Money transaction reference
-    status          = db.Column(db.Text, default="pending")  # pending | paid | failed
-    metadata_json   = db.Column(db.Text, default="{}")
-    created_at      = db.Column(db.Text, default=lambda: now_ts())
+class PayoutRequest(db.Model):
+    __tablename__ = "payout_requests"
+    id         = db.Column(db.Integer, primary_key=True)
+    user_email = db.Column(db.Text, nullable=False)
+    user_name  = db.Column(db.Text, default="")
+    om_number  = db.Column(db.Text, nullable=False)
+    amount     = db.Column(db.Float, nullable=False)
+    status     = db.Column(db.Text, default="pending")  # pending | paid | rejected
+    created_at = db.Column(db.Text, default=lambda: now_ts())
 
     def to_dict(self):
         return {
-            "id": self.id, "payer_email": self.payer_email,
-            "recipient_email": self.recipient_email,
-            "amount_cents": self.amount_cents,
-            "payment_type": self.payment_type,
-            "status": self.status,
-            "created_at": self.created_at,
+            "id": self.id, "user_email": self.user_email, "user_name": self.user_name,
+            "om_number": self.om_number, "amount": self.amount,
+            "status": self.status, "created_at": self.created_at,
         }
 
 
-# ---------- Utilities ----------
-def now_ts():
-    return datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-
 # ---------- Create tables ----------
 with app.app_context():
-    db.create_all()
+    try:
+        db.create_all()
+        print("✅ Database tables created/verified OK", flush=True)
+    except Exception as e:
+        print(f"⚠️  DB init warning (non-fatal): {e}", flush=True)
+
+    # Safe migrations — add columns that may not exist in older deployments
+    migrations = [
+        "ALTER TABLE ads ADD COLUMN approved INTEGER DEFAULT 0",
+        "ALTER TABLE ads ADD COLUMN whatsapp_number TEXT DEFAULT ''",
+        "ALTER TABLE payout_requests ADD COLUMN user_email TEXT DEFAULT ''",
+        "ALTER TABLE payout_requests ADD COLUMN user_name TEXT DEFAULT ''",
+        "ALTER TABLE payout_requests ADD COLUMN om_number TEXT DEFAULT ''",
+        "ALTER TABLE payout_requests ADD COLUMN amount FLOAT DEFAULT 0",
+        "ALTER TABLE payout_requests ADD COLUMN status TEXT DEFAULT 'pending'",
+        "ALTER TABLE payout_requests ADD COLUMN created_at TEXT DEFAULT ''",
+        "ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN last_active TEXT DEFAULT ''",
+    ]
+    for sql in migrations:
+        try:
+            db.session.execute(db.text(sql))
+            db.session.commit()
+            print(f"✅ Migration OK: {sql[:50]}", flush=True)
+        except Exception:
+            db.session.rollback()
+            pass  # Column already exists — that's fine
+
+# ---------- Health check ----------
+@app.route("/api/debug/posts")
+def api_debug_posts():
+    posts = Post.query.order_by(Post.id.desc()).limit(5).all()
+    return jsonify([{"id": p.id, "text": p.text, "file_url": p.file_url, "ts": p.timestamp} for p in posts])
+
+@app.route("/health")
+def health():
+    return "OK", 200
+
 
 # ---------- Static uploads ----------
 @app.route("/uploads/<path:filename>")
@@ -1015,112 +988,6 @@ body::after {
   margin-top: 4px;
 }
 
-.pay-sections {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  margin-bottom: 8px;
-}
-
-.pay-section {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 22px;
-  display: flex;
-  gap: 18px;
-  align-items: flex-start;
-  transition: border-color 0.2s;
-}
-.pay-section:hover { border-color: rgba(255,255,255,0.1); }
-
-.verified-section {
-  border-color: rgba(77,240,192,0.2);
-  background: linear-gradient(135deg, rgba(77,240,192,0.04) 0%, var(--card) 60%);
-}
-.verified-section:hover { border-color: rgba(77,240,192,0.4); }
-
-.pay-section-icon {
-  font-size: 28px;
-  flex-shrink: 0;
-  width: 48px;
-  height: 48px;
-  background: var(--surface);
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.pay-section-body { flex: 1; min-width: 0; }
-
-.pay-section-title {
-  font-family: 'Syne', sans-serif;
-  font-size: 16px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.pay-section-desc {
-  font-size: 13px;
-  color: var(--muted2);
-  line-height: 1.55;
-  margin-bottom: 14px;
-}
-
-.pay-row {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.pay-amount-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.pay-currency {
-  position: absolute;
-  left: 10px;
-  color: var(--muted2);
-  font-size: 14px;
-  pointer-events: none;
-}
-.pay-amount { padding-left: 22px !important; }
-
-.pay-note {
-  font-size: 12px;
-  color: var(--muted2);
-  margin-top: 6px;
-}
-.pay-note.success { color: var(--accent); }
-.pay-note.error   { color: var(--danger); }
-
-/* Orange Money uses inline form — no channel picker needed */
-
-.pay-history-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  margin-bottom: 8px;
-  font-size: 13px;
-}
-.pay-history-type {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
-}
-.pay-history-meta { color: var(--muted2); font-size: 12px; }
-.pay-status-paid   { color: var(--accent); font-weight: 600; }
-.pay-status-pending{ color: #f5c542; font-weight: 600; }
-.pay-status-failed { color: var(--danger); font-weight: 600; }
-
 /* ===== NOTIFICATIONS ===== */
 .notif-item {
   display: flex;
@@ -1294,6 +1161,15 @@ body::after {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
 
+/* Terms sidebar */
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+.tc-section { margin-bottom: 20px; }
+.tc-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; color: #e8f0ff; margin-bottom: 7px; letter-spacing: 0.2px; }
+.tc-text { font-size: 13px; color: #8899b4; line-height: 1.7; }
+
 /* File name display */
 #fileNameDisplay {
   font-size: 12px;
@@ -1391,6 +1267,9 @@ body::after {
       <button class="nav-tab" id="navProfile" onclick="showTab('profile')">
         <span>👤</span><span class="tab-label"> Profile</span>
       </button>
+      <button class="nav-tab" id="navTerms" onclick="openTerms()">
+        <span>📋</span><span class="tab-label"> Terms</span>
+      </button>
     </div>
 
     <div class="nav-right">
@@ -1419,7 +1298,13 @@ body::after {
               </label>
               <span id="fileNameDisplay"></span>
             </div>
-            <button class="btn-primary" onclick="addPost()">Post →</button>
+            <button class="btn-primary" id="postBtn" onclick="addPost()">Post →</button>
+          </div>
+          <div id="uploadProgress" style="display:none;margin-top:10px">
+            <div style="font-size:12px;color:var(--muted2);margin-bottom:6px" id="uploadLabel">Uploading...</div>
+            <div style="background:rgba(255,255,255,0.06);border-radius:100px;height:6px;overflow:hidden">
+              <div id="uploadBar" style="height:100%;width:0%;background:linear-gradient(90deg,#4DF0C0,#00c9ff);border-radius:100px;transition:width 0.3s ease"></div>
+            </div>
           </div>
         </div>
         <div id="feedList"></div>
@@ -1463,65 +1348,63 @@ body::after {
           </div>
         </div>
 
-        <!-- Payment sections -->
-        <div class="pay-sections">
-
-          <!-- ① Tip a Creator -->
-          <div class="pay-section">
-            <div class="pay-section-icon">💸</div>
-            <div class="pay-section-body">
-              <div class="pay-section-title">Tip a Creator</div>
-              <div class="pay-section-desc">Send a direct payment to any creator via PayPal or card. 90% goes directly to them.</div>
-              <div class="pay-row" style="margin-bottom:10px">
-                <input id="tipEmail" class="form-input" placeholder="Creator email" style="flex:1" />
-                <div class="pay-amount-wrap">
-                  <span class="pay-currency">$</span>
-                  <input id="tipAmount" class="form-input pay-amount" type="number" min="1" placeholder="5" style="width:80px" />
-                </div>
-                <button class="btn-primary" onclick="openPayModal('tip')">Send Tip →</button>
-              </div>
-            </div>
+        <!-- Ad Campaign -->
+        <div style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;margin-bottom:20px">
+          <div class="monet-section-title" style="margin-bottom:6px">📣 Advertise on VibeNet</div>
+          <div style="font-size:13px;color:var(--muted2);margin-bottom:16px;line-height:1.6">
+            Send your budget via Orange Money to <strong style="color:var(--accent);font-size:16px;letter-spacing:2px">72927417</strong>, then fill in your campaign details below. Your campaign goes live once payment is confirmed.
           </div>
-
-          <!-- ② Advertise -->
-          <div class="pay-section">
-            <div class="pay-section-icon">📣</div>
-            <div class="pay-section-body">
-              <div class="pay-section-title">Advertise on VibeNet</div>
-              <div class="pay-section-desc">Place your campaign in front of thousands. Priced at $5 per 1,000 impressions.</div>
-              <div class="pay-row" style="margin-bottom:10px">
-                <input id="adPayTitle" class="form-input" placeholder="Campaign name" style="flex:1" />
-                <div class="pay-amount-wrap">
-                  <span class="pay-currency">$</span>
-                  <input id="adPayBudget" class="form-input pay-amount" type="number" min="5" placeholder="50" style="width:80px" />
-                </div>
-                <button class="btn-primary" onclick="openPayModal('ad')">Launch Ad →</button>
-              </div>
-              <div id="adImpressionsPreview" class="pay-note"></div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div style="flex:1;min-width:160px">
+              <div class="form-label" style="margin-bottom:6px">Campaign Title</div>
+              <input id="adTitle" class="form-input" placeholder="My awesome campaign" style="width:100%" />
             </div>
-          </div>
-
-          <!-- ③ VibeNet Verified -->
-          <div class="pay-section verified-section">
-            <div class="pay-section-icon">✦</div>
-            <div class="pay-section-body">
-              <div class="pay-section-title">VibeNet Verified <span class="vbadge" style="width:20px;height:20px;font-size:12px">✦</span></div>
-              <div class="pay-section-desc">Get the official verified badge on your profile and all posts. $9.99 / month, cancel anytime.</div>
-              <div id="verifiedStatus" class="pay-note" style="margin-bottom:10px"></div>
-              <button class="btn-primary" id="verifiedBtn" onclick="openPayModal('verified')">Get Verified — $9.99/mo →</button>
+            <div style="width:130px">
+              <div class="form-label" style="margin-bottom:6px">Budget (BWP)</div>
+              <input id="adBudget" class="form-input" type="number" min="1" placeholder="50" style="width:100%" />
             </div>
+            <div style="width:100%;margin-top:10px">
+              <div class="form-label" style="margin-bottom:6px">WhatsApp Number (with country code)</div>
+              <input id="adWhatsapp" class="form-input" type="tel" placeholder="e.g. 26772927417" style="width:100%" />
+            </div>
+            <button class="btn-primary" onclick="createAd()">Submit →</button>
           </div>
-
+          <div id="adMsg" style="margin-top:12px;font-size:13px;line-height:1.6;display:none"></div>
         </div>
 
-        <!-- Payment history -->
-        <div class="monet-section-title" style="margin-top:28px">Payment History</div>
-        <div id="paymentHistory"></div>
+        <!-- Payout Request -->
+        <div id="payoutSection" style="background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px;margin-bottom:20px">
+          <div class="monet-section-title" style="margin-bottom:6px">💸 Request Payout</div>
+          <div style="font-size:13px;color:var(--muted2);margin-bottom:16px;line-height:1.6">
+            Enter your Orange Money number and the amount to withdraw. Payouts are sent manually within 24–48 hours.
+            <div style="margin-top:8px;padding:10px 14px;background:rgba(77,240,192,0.06);border:1px solid rgba(77,240,192,0.15);border-radius:10px;color:var(--muted2)">
+              📋 <strong style="color:var(--text)">Eligibility required:</strong> 1,000 followers + 4,000 watch hours. Check your status in the cards above.
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+            <div style="flex:1;min-width:160px">
+              <div class="form-label" style="margin-bottom:6px">Your Orange Money Number</div>
+              <input id="payoutNumber" class="form-input" placeholder="7XXXXXXX" style="width:100%" />
+            </div>
+            <div style="width:130px">
+              <div class="form-label" style="margin-bottom:6px">Amount (BWP)</div>
+              <input id="payoutAmount" class="form-input" type="number" min="1" placeholder="100" style="width:100%" />
+            </div>
+            <button class="btn-primary" onclick="requestPayout()">Request →</button>
+          </div>
+          <div id="payoutMsg" style="margin-top:12px;font-size:13px;line-height:1.6;display:none"></div>
+        </div>
 
-        <!-- Legacy ad campaigns (free) -->
-        <div class="monet-section-title" style="margin-top:20px">Active Campaigns</div>
+        <div class="monet-section-title">Active Campaigns</div>
         <div id="adsList"></div>
-      </div>
+
+        <!-- Admin only -->
+        <div id="adminPanel" style="display:none;margin-top:30px;padding:18px;background:rgba(240,106,77,0.07);border:1px solid rgba(240,106,77,0.3);border-radius:14px">
+          <div style="font-size:13px;color:var(--danger);font-weight:600;margin-bottom:12px">⚠️ Admin Tools</div>
+          <button class="btn-primary" style="background:var(--danger);color:#fff" onclick="adminWipePosts()">🗑 Wipe All Posts</button>
+          <div id="adminMsg" style="margin-top:10px;font-size:13px;display:none"></div>
+        </div>
+      </div><!-- /monet tab -->
 
       <!-- Profile Tab -->
       <div id="profile" class="tab">
@@ -1551,49 +1434,6 @@ body::after {
 
   </div><!-- /app-layout -->
 
-<!-- Orange Money Payment Modal -->
-<div id="payModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePayModal()">
-  <div class="modal-box" style="max-width:460px">
-    <div class="modal-title" id="payModalTitle">Pay with Orange Money</div>
-    <div id="payModalSummary" style="font-size:13px;color:var(--muted2);margin-bottom:16px;line-height:1.5"></div>
-
-    <!-- Orange Money form -->
-    <div id="om-step-form">
-      <div style="background:var(--surface);border:1px solid rgba(255,140,0,0.25);border-radius:12px;padding:16px;margin-bottom:16px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-          <span style="font-size:26px">🟠</span>
-          <div>
-            <div style="font-weight:700;font-size:14px">Orange Money — Botswana</div>
-            <div style="font-size:12px;color:var(--muted2)">Pay via your Orange Money wallet using USSD OTP</div>
-          </div>
-        </div>
-        <div class="form-label" style="margin-bottom:6px">Your Orange Money Number</div>
-        <input id="om-phone" class="form-input" placeholder="+267XXXXXXXX" style="width:100%;margin-bottom:10px" />
-        <div id="om-otp-row" style="display:none">
-          <div style="background:rgba(255,140,0,0.08);border:1px solid rgba(255,140,0,0.3);border-radius:8px;padding:12px;font-size:13px;color:var(--text);margin-bottom:10px;line-height:1.5">
-            📱 <strong>Dial <code>*144#</code> on your Orange phone</strong>, select <em>Generate OTP</em>, then enter the code below.
-          </div>
-          <div class="form-label" style="margin-bottom:6px">OTP Code</div>
-          <input id="om-otp" class="form-input" placeholder="Enter OTP from USSD" style="width:100%;letter-spacing:3px;font-size:16px" maxlength="6" />
-        </div>
-      </div>
-    </div>
-
-    <!-- Not configured fallback -->
-    <div id="om-not-configured" style="display:none;text-align:center;padding:24px;background:var(--surface);border-radius:12px;border:1px solid var(--border)">
-      <div style="font-size:28px;margin-bottom:10px">🔧</div>
-      <div style="font-weight:600;margin-bottom:6px">Orange Money not configured</div>
-      <div style="font-size:13px;color:var(--muted2)">Set <code style="background:var(--card);padding:2px 6px;border-radius:4px">OM_CLIENT_ID</code> and <code style="background:var(--card);padding:2px 6px;border-radius:4px">OM_CLIENT_SECRET</code> environment variables.</div>
-    </div>
-
-    <div id="payModalError" class="pay-note error" style="margin-top:10px"></div>
-    <div class="modal-footer">
-      <button class="btn-ghost" onclick="closePayModal()">Cancel</button>
-      <button class="btn-primary" id="paySubmitBtn" onclick="submitPayment()">Request OTP →</button>
-    </div>
-  </div>
-</div>
-
 <!-- Edit Post Modal -->
 <div id="editModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeEditModal()">
   <div class="modal-box">
@@ -1603,6 +1443,70 @@ body::after {
       <button class="btn-ghost" onclick="closeEditModal()">Cancel</button>
       <button class="btn-primary" onclick="saveEditPost()">Save Changes</button>
     </div>
+  </div>
+</div>
+
+<!-- Terms & Conditions Sidebar -->
+<div id="termsOverlay" onclick="closeTerms()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(4px);z-index:300"></div>
+<div id="termsSidebar" style="display:none;position:fixed;top:0;right:0;width:min(420px,100vw);height:100vh;background:#0c1018;border-left:1px solid rgba(255,255,255,0.08);z-index:301;overflow-y:auto;padding:28px 24px;animation:slideIn 0.3s ease">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+    <div style="font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:#4DF0C0">📋 Terms &amp; Conditions</div>
+    <button onclick="closeTerms()" style="background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#8899b4;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:16px">✕</button>
+  </div>
+  <div style="font-size:12px;color:#5a6a85;margin-bottom:20px">Last updated: January 2025 · VibeNet, Botswana</div>
+
+  <div class="tc-section">
+    <div class="tc-title">1. Acceptance of Terms</div>
+    <p class="tc-text">By accessing or using VibeNet, you agree to be bound by these Terms and Conditions. If you do not agree, please do not use the platform. We reserve the right to update these terms at any time.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">2. Eligibility</div>
+    <p class="tc-text">You must be at least 18 years old to use VibeNet. By registering, you confirm that the information you provide is accurate and that you are legally permitted to use this service in your jurisdiction.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">3. Content Policy</div>
+    <p class="tc-text">You are solely responsible for content you post. You must not post content that is unlawful, harmful, hateful, sexually explicit, or that infringes on the rights of others. VibeNet reserves the right to remove any content and suspend accounts that violate this policy without notice.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">4. Creator Earnings</div>
+    <p class="tc-text">Creators earn revenue through video views and ad impressions on their content. Payouts require a minimum of 1,000 followers and 4,000 watch hours. VibeNet processes payouts manually via Orange Money within 24–48 hours of a verified request. Earnings may be withheld if fraudulent activity is suspected.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">5. Advertising</div>
+    <p class="tc-text">Ad campaigns submitted on VibeNet are subject to review and approval. VibeNet reserves the right to reject any campaign without providing a reason. Payment for ads is made in advance via Orange Money to the number provided. Approved campaigns will be activated once payment is confirmed.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">6. Account Suspension</div>
+    <p class="tc-text">VibeNet may suspend or permanently ban accounts that violate these terms, engage in spam, abuse other users, or attempt to manipulate the platform's earnings system. Banned users forfeit any pending earnings.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">7. Privacy</div>
+    <p class="tc-text">We collect only the information necessary to operate the platform (name, email, content you post). We do not sell your personal data to third parties. Media is stored securely on Cloudinary's CDN. By using VibeNet you consent to this data collection.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">8. Intellectual Property</div>
+    <p class="tc-text">You retain ownership of the content you post. By posting on VibeNet you grant us a non-exclusive, royalty-free licence to display and distribute your content within the platform. You must not post content you do not own or have rights to.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">9. Limitation of Liability</div>
+    <p class="tc-text">VibeNet is provided "as is" without warranties of any kind. We are not liable for any loss of data, earnings, or indirect damages arising from the use of the platform. Service availability is not guaranteed.</p>
+  </div>
+
+  <div class="tc-section">
+    <div class="tc-title">10. Governing Law</div>
+    <p class="tc-text">These terms are governed by the laws of the Republic of Botswana. Any disputes shall be resolved under Botswana jurisdiction.</p>
+  </div>
+
+  <div style="margin-top:28px;padding:16px;background:rgba(77,240,192,0.06);border:1px solid rgba(77,240,192,0.15);border-radius:12px;font-size:12px;color:#8899b4;line-height:1.6">
+    Questions? Contact us at <span style="color:#4DF0C0">support@vibenet.bw</span>
   </div>
 </div>
 
@@ -1633,13 +1537,37 @@ async function signup(){
   const email = byId('signupEmail').value.trim().toLowerCase();
   const password = byId('signupPassword').value;
   if(!name||!email||!password){ alert('Please fill all required fields.'); return; }
+
   const pic = byId('signupPic').files[0];
-  const fd = new FormData();
-  fd.append('name', name); fd.append('email', email); fd.append('password', password);
-  if(pic) fd.append('file', pic);
-  const res = await fetch(API + '/signup', { method:'POST', body: fd });
+
+  // Create account immediately — no waiting for pic upload
+  const res = await fetch(API + '/signup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, email, password, profile_pic: '' })
+  });
   const j = await res.json();
-  if(j.user){ currentUser = j.user; onLogin(); } else alert(j.error || j.message);
+  if(!j.user){ alert(j.error || j.message); return; }
+  currentUser = j.user;
+  onLogin();
+
+  // Upload pic in background after login — user is already in
+  if(pic){
+    try {
+      const url = await uploadFile(pic, 'vibenet/avatars');
+      if(url){
+        await fetch(API + '/update_profile_pic', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ email, profile_pic: url })
+        });
+        currentUser.profile_pic = url;
+        const av = byId('topAvatar'); if(av){ av.src = url; av.style.display='block'; }
+        const ca = byId('composerAvatar'); if(ca){ ca.src = url; }
+        const pa = byId('profileAvatar'); if(pa){ pa.src = url; }
+      }
+    } catch(e){ console.warn('Profile pic upload failed (non-fatal):', e); }
+  }
 }
 
 async function login(){
@@ -1678,7 +1606,8 @@ function onLogin(){
   if(currentUser.profile_pic){ pa.src = currentUser.profile_pic; }
 
   refreshAll();
-  window._vn_poll = setInterval(()=>{ if(currentUser){ loadNotifications(); loadMonetization(); } }, 5000);
+  checkAdmin();
+  window._vn_poll = setInterval(()=>{ if(currentUser){ loadNotifications(false); loadMonetization(); loadFeed(); } }, 30000);
 }
 
 // Tabs
@@ -1695,15 +1624,107 @@ function showTab(tab){
   if(navMap[tab]) byId(navMap[tab]).classList.add('active');
 
   if(tab === 'profile') loadProfilePosts();
-  if(tab === 'notifications') loadNotifications();
-  if(tab === 'monet'){ loadMonetization(); loadAds(); loadPaymentHistory(); checkVerifiedStatus(); }
+  if(tab === 'notifications') loadNotifications(true);
+  if(tab === 'monet'){ loadMonetization(); loadAds();  }
 }
 
-async function uploadFile(file){
-  const fd = new FormData(); fd.append('file', file);
-  const res = await fetch(API + '/upload', {method:'POST', body: fd});
+function showUploadProgress(show, label='Uploading...'){
+  const p = byId('uploadProgress');
+  const btn = byId('postBtn');
+  if(!p) return;
+  if(show){
+    p.style.display = 'block';
+    byId('uploadLabel').textContent = label;
+    byId('uploadBar').style.width = '0%';
+    if(btn){ btn.disabled = true; btn.style.opacity = '0.5'; }
+    // Animate bar to 90% while uploading
+    let w = 0;
+    p._interval = setInterval(()=>{
+      w = Math.min(w + (Math.random() * 4), 88);
+      byId('uploadBar').style.width = w + '%';
+    }, 300);
+  } else {
+    clearInterval(p._interval);
+    byId('uploadBar').style.width = '100%';
+    setTimeout(()=>{ p.style.display='none'; byId('uploadBar').style.width='0%'; }, 600);
+    if(btn){ btn.disabled = false; btn.style.opacity = '1'; }
+  }
+}
+
+async function uploadFile(file, folder='vibenet/posts'){
+  const isPost = folder === 'vibenet/posts';
+  const isVideo = file.type.startsWith('video/');
+  if(isVideo && file.size > 20 * 1024 * 1024){
+    alert('Video too large. Max 20MB.');
+    return '';
+  }
+  if(isPost) showUploadProgress(true, `Uploading ${isVideo ? 'video' : 'image'} (${(file.size/1024/1024).toFixed(1)}MB)...`);
+  try {
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API + '/upload', {method:'POST', body: fd});
+    const j = await res.json();
+    if(j.error) throw new Error(j.error);
+    if(!j.url) throw new Error('No URL returned');
+    if(isPost) showUploadProgress(false);
+    return j.url;
+  } catch(e){
+    if(isPost) showUploadProgress(false);
+    alert('Upload failed: ' + e.message);
+    return '';
+  }
+}
+
+
+function optimizeCldUrl(url, isVideo){
+  return url; // media stored as data URLs, no transform needed
+}
+
+function isVideoUrl(url){
+  if(!url) return false;
+  return url.includes('/video/upload/') ||
+         url.includes('resource_type=video') ||
+         /\.(mp4|webm|mov|avi|mkv|ogv)(\?|$|#)/i.test(url);
+}
+
+async function createAd(){
+  const title    = byId('adTitle').value.trim();
+  const budget   = parseFloat(byId('adBudget').value || 0);
+  const whatsapp = byId('adWhatsapp').value.trim().replace(/\D/g,'');
+  const msg      = byId('adMsg');
+  if(!title || !budget){ alert('Please enter a title and budget.'); return; }
+  if(!whatsapp){ alert('Please enter your WhatsApp number.'); return; }
+  await fetch(API+'/ads', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({title, budget, whatsapp_number: whatsapp, owner: currentUser.email})});
+  byId('adTitle').value = ''; byId('adBudget').value = ''; byId('adWhatsapp').value = '';
+  msg.style.display = 'block';
+  msg.style.color = 'var(--accent)';
+  msg.textContent = '✅ Campaign submitted! Please send P' + budget.toFixed(2) + ' via Orange Money to 72927417. Your campaign goes live once we confirm your payment.';
+  setTimeout(()=>{ msg.style.display='none'; }, 10000);
+  loadAds();
+}
+
+async function requestPayout(){
+  const omNumber = byId('payoutNumber').value.trim();
+  const amount = parseFloat(byId('payoutAmount').value || 0);
+  const msg = byId('payoutMsg');
+  if(!omNumber){ alert('Please enter your Orange Money number.'); return; }
+  if(!amount || amount <= 0){ alert('Please enter a valid amount.'); return; }
+  const res = await fetch(API+'/payout', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ email: currentUser.email, om_number: omNumber, amount })
+  });
   const j = await res.json();
-  return j.url || '';
+  msg.style.display = 'block';
+  if(j.success){
+    byId('payoutNumber').value = ''; byId('payoutAmount').value = '';
+    msg.style.color = 'var(--accent)';
+    msg.textContent = '✅ ' + j.message;
+    await loadMonetization();
+  } else {
+    msg.style.color = 'var(--danger)';
+    msg.textContent = '❌ ' + (j.error || 'Something went wrong.');
+  }
+  setTimeout(()=>{ msg.style.display='none'; }, 8000);
 }
 
 async function addPost(){
@@ -1711,11 +1732,16 @@ async function addPost(){
   const text = byId('postText').value.trim();
   const fileEl = byId('fileUpload');
   let url = '';
-  if(fileEl.files[0]) url = await uploadFile(fileEl.files[0]);
+  if(fileEl.files[0]){
+    url = await uploadFile(fileEl.files[0]);
+    console.log('Upload result URL:', url);
+  }
   if(!text && !url) return;
-  await fetch(API + '/posts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+  const res = await fetch(API + '/posts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
     author_email: currentUser.email, author_name: currentUser.name, profile_pic: currentUser.profile_pic||'', text, file_url: url
   })});
+  const j = await res.json();
+  console.log('Post created:', j);
   byId('postText').value=''; fileEl.value=''; byId('fileNameDisplay').textContent='';
   await loadFeed(); await loadProfilePosts(); await loadMonetization();
 }
@@ -1770,10 +1796,11 @@ function createPostElement(p){
 
   if(p.file_url){
     const media = document.createElement('div'); media.className='post-media';
-    if(p.file_url.endsWith('.mp4')||p.file_url.endsWith('.webm')||p.file_url.includes('video')){
+    const isVideo = isVideoUrl(p.file_url);
+    if(isVideo){
       const wrap = document.createElement('div'); wrap.className='video-wrap';
       const v = document.createElement('video');
-      v.src = p.file_url; v.controls = true; v.muted = true; v.loop = false;
+      v.src = optimizeCldUrl(p.file_url, true); v.controls = true; v.muted = true; v.loop = false;
       v.setAttribute('playsinline','');
       const hint = document.createElement('div'); hint.className='play-hint';
       hint.innerHTML='<span>▶</span>';
@@ -1788,7 +1815,7 @@ function createPostElement(p){
       wrap.append(v, hint);
       media.append(wrap);
     } else {
-      const im=document.createElement('img'); im.src=p.file_url; media.append(im);
+      const im=document.createElement('img'); im.src=optimizeCldUrl(p.file_url, false); media.append(im);
     }
     div.append(media);
   }
@@ -1823,16 +1850,25 @@ function createPostElement(p){
   return div;
 }
 
-async function loadFeed(){
-  const res = await fetch(API+'/posts');
-  const list = await res.json();
-  const feed = byId('feedList'); feed.innerHTML='';
-  if(!list.length){
-    feed.innerHTML='<div class="empty-state"><div class="empty-icon">📭</div><p>No posts yet. Be the first to share something!</p></div>';
-    return;
-  }
-  list.forEach(p=>feed.appendChild(createPostElement(p)));
-  observeVideos();
+function createAdCard(ad){
+  const div = document.createElement('div');
+  const waNumber = (ad.whatsapp_number||'').replace(/\D/g,'');
+  const waMsg = encodeURIComponent(`Hi! I saw your ad "${ad.title}" on VibeNet and I'd like to know more.`);
+  const waLink = waNumber ? `https://wa.me/${waNumber}?text=${waMsg}` : '';
+  div.style.cssText = `background:linear-gradient(135deg,rgba(77,240,192,0.06),rgba(0,201,255,0.04));border:1px solid rgba(77,240,192,0.2);border-radius:16px;padding:16px 18px;margin-bottom:12px;${waLink?'cursor:pointer;':''}`;
+  if(waLink) div.onclick = ()=> window.open(waLink,'_blank','noopener');
+  div.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+      <span style="background:rgba(77,240,192,0.15);color:#4DF0C0;font-size:10px;font-weight:800;padding:3px 8px;border-radius:100px;letter-spacing:0.8px">SPONSORED</span>
+      ${waLink ? '<span style="font-size:11px;color:#25D366;font-weight:600">Tap to chat →</span>' : ''}
+    </div>
+    <div style="font-size:15px;font-weight:700;color:#e8f0ff;margin-bottom:8px">\${escapeHtml(ad.title||'')}</div>
+    ${waLink ? `<div style="display:inline-flex;align-items:center;gap:8px;background:#25D366;color:#fff;font-size:13px;font-weight:700;padding:9px 16px;border-radius:100px;pointer-events:none">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>
+      Chat on WhatsApp
+    </div>` : '<div style="font-size:12px;color:#5a6a85">Promoted on VibeNet</div>'}
+  `;
+  return div;
 }
 
 function observeVideos(){
@@ -1864,19 +1900,25 @@ function observeVideos(){
   window._vn_obs = obs;
 }
 
-async function loadNotifications(){
+async function loadNotifications(markSeen=false){
   if(!currentUser) return;
+  if(markSeen){
+    await fetch(API+'/notifications/mark-seen/'+encodeURIComponent(currentUser.email), {method:'POST'});
+  }
   const r=await fetch(API+'/notifications/'+encodeURIComponent(currentUser.email));
-  const list=await r.json();
+  const data=await r.json();
+  const list = data.items || [];
+  const unseen = data.unseen || 0;
   const el=byId('notifList'); el.innerHTML='';
   const countEl=byId('notifCount');
-  if(list.length){ countEl.style.display='inline-block'; countEl.textContent=list.length; } else countEl.style.display='none';
+  if(unseen > 0){ countEl.style.display='inline-block'; countEl.textContent=unseen; } else countEl.style.display='none';
   if(!list.length){
     el.innerHTML='<div class="empty-state" style="padding:32px"><div class="empty-icon">🎉</div><p>All caught up!</p></div>';
     return;
   }
   list.forEach(n=>{
     const d=document.createElement('div'); d.className='notif-item';
+    if(!n.seen) d.style.background='rgba(77,240,192,0.04)';
     const icon=n.text.includes('reaction')?'⚡':n.text.includes('follow')?'👋':'🔔';
     d.innerHTML=`<div class="notif-icon">${icon}</div><div><div class="notif-text">${escapeHtml(n.text)}</div><div class="notif-time">${escapeHtml(n.timestamp)}</div></div>`;
     el.appendChild(d);
@@ -1921,12 +1963,44 @@ async function updateBio(){
 
 async function loadMonetization(){
   if(!currentUser) return;
-  const r=await fetch(API+'/monetization/'+encodeURIComponent(currentUser.email));
-  const j=await r.json();
-  byId('monFollowers').textContent=j.followers;
-  byId('monWatch').textContent=j.watch_hours;
-  byId('monEarnings').textContent=(j.earnings||0).toFixed(2);
-  byId('monStatus').textContent=j.followers>=1000&&j.watch_hours>=4000?'✅ Eligible':'⏳ Growing';
+  const r = await fetch(API+'/monetization/'+encodeURIComponent(currentUser.email));
+  const j = await r.json();
+  const followers  = j.followers   || 0;
+  const watchHours = j.watch_hours || 0;
+  const earnings   = j.earnings    || 0;
+  const eligible   = j.eligible;
+
+  byId('monFollowers').textContent = followers;
+  byId('monWatch').textContent     = watchHours;
+  byId('monEarnings').textContent  = earnings.toFixed(2);
+
+  const statusEl = byId('monStatus');
+  if(eligible){
+    statusEl.innerHTML = '✅ Eligible';
+    statusEl.style.color = 'var(--accent)';
+  } else {
+    // Show what's still needed
+    const needFollowers  = Math.max(0, 1000 - followers);
+    const needWatchHours = Math.max(0, 4000 - watchHours);
+    let msg = '⏳ Growing';
+    const parts = [];
+    if(needFollowers > 0)  parts.push(`${needFollowers} more followers`);
+    if(needWatchHours > 0) parts.push(`${needWatchHours} more watch hours`);
+    if(parts.length) msg += ` — need ${parts.join(' & ')}`;
+    statusEl.innerHTML = msg;
+    statusEl.style.color = 'var(--muted2)';
+    statusEl.style.fontSize = '13px';
+  }
+
+  // Show/hide payout section based on eligibility
+  const payoutSection = byId('payoutSection');
+  if(payoutSection){
+    if(eligible){
+      payoutSection.style.display = 'block';
+    } else {
+      payoutSection.style.display = 'none';
+    }
+  }
 }
 
 async function createAd(){
@@ -1991,198 +2065,48 @@ async function saveEditPost(){
 }
 
 
-// ── Orange Money Payment helpers ─────────────────────────────────────────
-let _payModalType  = null;
-let _omOrderId     = null;   // Order ID from step 1 — needed for OTP confirmation
-let _omOtpPending  = false;  // true after order created, waiting for OTP
 
-async function openPayModal(type){
-  if(!currentUser){ alert('Login first'); return; }
-  _payModalType = type;
-  _omOrderId    = null;
-  _omOtpPending = false;
 
-  const titles = { tip:'Tip a Creator', ad:'Launch Ad Campaign', verified:'Get VibeNet Verified' };
-  const summaries = {
-    tip:      () => { const e=byId('tipEmail').value.trim(); const a=byId('tipAmount').value||'?'; return `Sending BWP equivalent of $${a} to <strong>${escapeHtml(e||'enter email above')}</strong>. 90% goes to the creator.`; },
-    ad:       () => { const t=byId('adPayTitle').value.trim(); const b=byId('adPayBudget').value||'?'; const i=Math.floor((parseFloat(b)||0)/5*1000); return `Campaign: <strong>${escapeHtml(t||'enter name above')}</strong> · $${b} · ~${i.toLocaleString()} impressions`; },
-    verified: () => '<strong>VibeNet Verified badge</strong> — BWP 109/month (~$9.99). Cancel anytime.',
-  };
+async function refreshAll(){ await loadFeed(); await loadNotifications(); await loadProfilePosts(); await loadMonetization(); await loadAds(); }
 
-  byId('payModalTitle').textContent = titles[type] || 'Pay with Orange Money';
-  byId('payModalSummary').innerHTML = summaries[type] ? summaries[type]() : '';
-  byId('payModalError').textContent = '';
-  byId('om-otp-row').style.display  = 'none';
-  byId('om-phone').value            = '';
-  byId('payModal').style.display    = 'flex';
-  byId('om-step-form').style.display      = 'block';
-  byId('om-not-configured').style.display = 'none';
-  byId('paySubmitBtn').textContent  = 'Request OTP →';
-  byId('paySubmitBtn').style.display = 'inline-flex';
-
-  // Quick check if configured
-  const r = await fetch(API+'/pay/status');
-  const j = await r.json();
-  if(!j.configured){
-    byId('om-step-form').style.display      = 'none';
-    byId('om-not-configured').style.display = 'block';
-    byId('paySubmitBtn').style.display      = 'none';
-  }
+// Terms & Conditions sidebar
+function openTerms(){
+  byId('termsSidebar').style.display = 'block';
+  byId('termsOverlay').style.display = 'block';
+  document.body.style.overflow = 'hidden';
+}
+function closeTerms(){
+  byId('termsSidebar').style.display = 'none';
+  byId('termsOverlay').style.display = 'none';
+  document.body.style.overflow = '';
 }
 
-async function submitPayment(){
-  const errEl     = byId('payModalError');
-  const submitBtn = byId('paySubmitBtn');
-  errEl.textContent = '';
-
-  const phone = byId('om-phone').value.trim();
-  if(!phone){ errEl.textContent='Enter your Orange Money number (+267XXXXXXXX)'; return; }
-
-  if(!_omOtpPending){
-    // ── Step 1: Create payment order → triggers USSD OTP on user's phone ──
-    submitBtn.textContent = 'Sending OTP...';
-    submitBtn.disabled    = true;
-
-    let body = { payer: currentUser.email, phone };
-    if(_payModalType === 'tip'){
-      const email  = byId('tipEmail').value.trim();
-      const amount = parseFloat(byId('tipAmount').value || 0);
-      if(!email || amount < 1){ errEl.textContent='Enter creator email and amount ($1 min)'; submitBtn.textContent='Request OTP →'; submitBtn.disabled=false; return; }
-      body = { ...body, recipient: email, amount_usd: amount };
-    } else if(_payModalType === 'ad'){
-      const title  = byId('adPayTitle').value.trim();
-      const budget = parseFloat(byId('adPayBudget').value || 0);
-      if(!title || budget < 5){ errEl.textContent='Enter campaign name and budget ($5 min)'; submitBtn.textContent='Request OTP →'; submitBtn.disabled=false; return; }
-      body = { ...body, title, budget_usd: budget };
-    }
-
-    const initRoute = { tip:'/pay/tip', ad:'/pay/ad', verified:'/pay/verified' }[_payModalType];
-    const res = await fetch(API+initRoute, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    const j   = await res.json();
-
-    submitBtn.textContent = 'Request OTP →';
-    submitBtn.disabled    = false;
-
-    if(j.already_verified){ closePayModal(); alert('You are already verified!'); return; }
-
-    if(j.order_id || j.id){
-      _omOrderId    = j.order_id || j.id;
-      _omOtpPending = true;
-      byId('om-otp-row').style.display  = 'block';
-      byId('om-phone').disabled         = true;
-      submitBtn.textContent = 'Confirm Payment →';
-      errEl.style.color = 'var(--accent)';
-      errEl.textContent = '✓ OTP sent! Dial *144# → Generate OTP, then enter code above.';
-    } else {
-      errEl.style.color = 'var(--danger)';
-      errEl.textContent = j.error || 'Could not initiate payment.';
-    }
-
-  } else {
-    // ── Step 2: Confirm OTP ────────────────────────────────────────────────
-    const otp = byId('om-otp').value.trim();
-    if(!otp){ errEl.textContent='Enter the OTP from your phone'; return; }
-    submitBtn.textContent = 'Confirming...';
-    submitBtn.disabled    = true;
-
-    const res = await fetch(API+'/pay/confirm', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ order_id: _omOrderId, otp, payer: currentUser.email })
-    });
-    const j = await res.json();
-    submitBtn.textContent = 'Confirm Payment →';
-    submitBtn.disabled    = false;
-
-    if(j.success){
-      closePayModal();
-      await loadPaymentHistory();
-      await loadMonetization();
-      if(_payModalType === 'verified'){ currentUser.verified = true; checkVerifiedStatus(); }
-      const msgs = {
-        tip:      'Tip sent! The creator has been notified.',
-        ad:       `Ad campaign is live! (~${j.impressions||0} impressions)`,
-        verified: 'You are now VibeNet Verified! ✦',
-      };
-      alert(msgs[_payModalType] || 'Payment successful!');
-    } else {
-      errEl.style.color = 'var(--danger)';
-      errEl.textContent = j.error || 'OTP confirmation failed. Please try again.';
-    }
+// Admin — only visible to owner
+const ADMIN_EMAIL = 'botsile55@gmail.com';
+function checkAdmin(){
+  if(currentUser && currentUser.email === ADMIN_EMAIL){
+    const p = byId('adminPanel');
+    if(p) p.style.display = 'block';
   }
 }
-
-function closePayModal(){
-  byId('payModal').style.display = 'none';
-  _payModalType  = null;
-  _omOrderId     = null;
-  _omOtpPending  = false;
-  byId('om-phone').disabled = false;
-}
-
-async function loadPaymentHistory(){
-  if(!currentUser) return;
-  const r = await fetch(API+'/pay/history?email='+encodeURIComponent(currentUser.email));
-  const list = await r.json();
-  const el = byId('paymentHistory'); el.innerHTML = '';
-  if(!list.length){
-    el.innerHTML = '<div class="empty-state" style="padding:24px"><div class="empty-icon">🧾</div><p>No payments yet.</p></div>';
-    return;
-  }
-  const icons = { tip:'💸', ad:'📣', verified:'✦' };
-  const labels = { tip:'Tip sent', ad:'Ad campaign', verified:'Verified badge' };
-  list.forEach(p=>{
-    const d = document.createElement('div'); d.className='pay-history-item';
-    const statusCls = p.status==='paid'?'pay-status-paid': p.status==='pending'?'pay-status-pending':'pay-status-failed';
-    d.innerHTML = `
-      <div>
-        <div class="pay-history-type">${icons[p.payment_type]||'💳'} ${labels[p.payment_type]||p.payment_type}
-          ${p.recipient_email ? '<span style="color:var(--muted2);font-weight:400"> → '+escapeHtml(p.recipient_email)+'</span>' : ''}
-        </div>
-        <div class="pay-history-meta">${escapeHtml(p.created_at)}</div>
-      </div>
-      <div style="text-align:right">
-        <div style="font-weight:700">$${(p.amount_cents/100).toFixed(2)}</div>
-        <div class="${statusCls}">${p.status}</div>
-      </div>`;
-    el.appendChild(d);
+async function adminWipePosts(){
+  if(!confirm('Delete ALL posts? This cannot be undone.')) return;
+  const msg = byId('adminMsg');
+  const res = await fetch('/api/admin/wipe-posts', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({confirm:'WIPE'})
   });
-}
-
-// Show impressions preview when typing ad budget
-document.addEventListener('DOMContentLoaded', ()=>{
-  const adBudgetEl = document.getElementById('adPayBudget');
-  const previewEl  = document.getElementById('adImpressionsPreview');
-  if(adBudgetEl && previewEl){
-    adBudgetEl.addEventListener('input', ()=>{
-      const v = parseFloat(adBudgetEl.value||0);
-      if(v >= 5){
-        const imps = Math.floor((v / 5) * 1000);
-        previewEl.textContent = `Est. ${imps.toLocaleString()} impressions`;
-        previewEl.className = 'pay-note success';
-      } else {
-        previewEl.textContent = '$5 minimum';
-        previewEl.className = 'pay-note error';
-      }
-    });
-  }
-});
-
-// Update verified button state
-async function checkVerifiedStatus(){
-  if(!currentUser) return;
-  const statusEl = byId('verifiedStatus');
-  const btn      = byId('verifiedBtn');
-  if(!statusEl || !btn) return;
-  if(currentUser.verified){
-    statusEl.textContent = 'You are verified ✦';
-    statusEl.className   = 'pay-note success';
-    btn.textContent      = 'Already Verified';
-    btn.disabled         = true;
-    btn.style.opacity    = '0.5';
+  const j = await res.json();
+  msg.style.display = 'block';
+  if(j.success){
+    msg.style.color = 'var(--accent)';
+    msg.textContent = '✅ All posts wiped.';
+    await loadFeed();
+  } else {
+    msg.style.color = 'var(--danger)';
+    msg.textContent = '❌ ' + (j.error || 'Failed');
   }
 }
-
-async function refreshAll(){ await loadFeed(); await loadNotifications(); await loadProfilePosts(); await loadMonetization(); await loadAds(); await loadPaymentHistory(); await checkVerifiedStatus(); }
 </script>
 </body>
 </html>
@@ -2195,23 +2119,15 @@ def index():
 # ---------- API: Auth ----------
 @app.route("/api/signup", methods=["POST"])
 def api_signup():
-    name     = request.form.get("name", "").strip()
-    email    = request.form.get("email", "").strip().lower()
-    password = request.form.get("password", "")
+    data     = request.get_json() or {}
+    name     = data.get("name", "").strip()
+    email    = data.get("email", "").strip().lower()
+    password = data.get("password", "")
     if not email or not password:
         return jsonify({"error": "email + password required"}), 400
-
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "User already exists"}), 400
-
-    profile_pic = ""
-    if "file" in request.files:
-        f = request.files["file"]
-        if f and f.filename:
-            fn = f"{uuid.uuid4().hex}_{f.filename}"
-            f.save(os.path.join(UPLOAD_DIR, fn))
-            profile_pic = f"/uploads/{fn}"
-
+    profile_pic = data.get("profile_pic", "")
     user = User(name=name, email=email, password=password, profile_pic=profile_pic)
     db.session.add(user)
     db.session.commit()
@@ -2227,6 +2143,10 @@ def api_login():
     user     = User.query.filter_by(email=email, password=password).first()
     if not user:
         return jsonify({"error": "Invalid credentials"}), 401
+    if user.banned:
+        return jsonify({"error": "Your account has been suspended. Contact support."}), 403
+    user.last_active = now_ts()
+    db.session.commit()
     session["user_email"] = email
     return jsonify({"user": user.to_dict()})
 
@@ -2254,35 +2174,17 @@ def api_upload():
     f = request.files["file"]
     if not f.filename:
         return jsonify({"error": "No filename"}), 400
-    fn = f"{uuid.uuid4().hex}_{f.filename}"
-    f.save(os.path.join(UPLOAD_DIR, fn))
-    return jsonify({"url": f"/uploads/{fn}"})
+    import base64
+    data = f.read()
+    if len(data) > 20 * 1024 * 1024:
+        return jsonify({"error": "File too large (max 20MB)"}), 400
+    mime = f.mimetype or "application/octet-stream"
+    b64  = base64.b64encode(data).decode("utf-8")
+    data_url = f"data:{mime};base64,{b64}"
+    return jsonify({"url": data_url})
 
 
-# ---------- Posts ----------
-@app.route("/api/posts", methods=["GET", "POST"])
-def api_posts():
-    if request.method == "GET":
-        posts = Post.query.order_by(Post.id.desc()).all()
-        # Build a verified lookup map
-        emails = list({p.author_email for p in posts})
-        verified_map = {}
-        if emails:
-            users = User.query.filter(User.email.in_(emails)).all()
-            verified_map = {u.email: bool(u.verified) for u in users}
-        return jsonify([p.to_dict(author_verified=verified_map.get(p.author_email, False)) for p in posts])
 
-    data = request.get_json() or {}
-    post = Post(
-        author_email=data.get("author_email"),
-        author_name=data.get("author_name"),
-        profile_pic=data.get("profile_pic", ""),
-        text=data.get("text", ""),
-        file_url=data.get("file_url", ""),
-    )
-    db.session.add(post)
-    db.session.commit()
-    return jsonify(post.to_dict())
 
 
 @app.route("/api/posts/<int:post_id>", methods=["DELETE", "PATCH"])
@@ -2348,7 +2250,15 @@ def api_react_post():
 @app.route("/api/notifications/<email>")
 def api_notifications_get(email):
     notifs = Notification.query.filter_by(user_email=email).order_by(Notification.id.desc()).all()
-    return jsonify([n.to_dict() for n in notifs])
+    unseen = sum(1 for n in notifs if not n.seen)
+    return jsonify({"items": [n.to_dict() for n in notifs], "unseen": unseen})
+
+
+@app.route("/api/notifications/mark-seen/<email>", methods=["POST"])
+def api_notifications_mark_seen(email):
+    Notification.query.filter_by(user_email=email, seen=0).update({"seen": 1})
+    db.session.commit()
+    return jsonify({"success": True})
 
 
 # ---------- Monetization / Profile ----------
@@ -2357,8 +2267,14 @@ def api_monetization_get(email):
     followers = Follower.query.filter_by(user_email=email).count()
     user      = User.query.filter_by(email=email).first()
     if user:
-        return jsonify({"followers": followers, "watch_hours": user.watch_hours, "earnings": user.earnings})
-    return jsonify({"followers": 0, "watch_hours": 0, "earnings": 0})
+        eligible = followers >= 1000 and user.watch_hours >= 4000
+        return jsonify({
+            "followers":   followers,
+            "watch_hours": user.watch_hours,
+            "earnings":    user.earnings,
+            "eligible":    eligible,
+        })
+    return jsonify({"followers": 0, "watch_hours": 0, "earnings": 0, "eligible": False})
 
 
 @app.route("/api/profile/<email>")
@@ -2377,6 +2293,16 @@ def api_update_bio():
     user  = User.query.filter_by(email=data.get("email")).first()
     if user:
         user.bio = data.get("bio", "")
+        db.session.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/update_profile_pic", methods=["POST"])
+def api_update_profile_pic():
+    data  = request.get_json() or {}
+    user  = User.query.filter_by(email=data.get("email")).first()
+    if user:
+        user.profile_pic = data.get("profile_pic", "")
         db.session.commit()
     return jsonify({"success": True})
 
@@ -2428,282 +2354,374 @@ def api_watch():
 def api_ads():
     if request.method == "POST":
         data = request.get_json() or {}
-        ad   = Ad(title=data.get("title"), owner_email=data.get("owner"), budget=data.get("budget", 0))
+        ad   = Ad(title=data.get("title"), owner_email=data.get("owner"), whatsapp_number=data.get("whatsapp_number",""), budget=data.get("budget", 0), approved=0)
         db.session.add(ad)
         db.session.commit()
         return jsonify({"message": "Ad created"})
-    ads = Ad.query.order_by(Ad.id.desc()).all()
+    # Only return approved ads to regular users
+    ads = Ad.query.filter_by(approved=1).order_by(Ad.id.desc()).all()
     return jsonify([a.to_dict() for a in ads])
 
 
 @app.route("/api/ads/impression", methods=["POST"])
 def api_ads_impression():
+    data    = request.get_json() or {}
+    post_id = data.get("post_id")
+    post    = Post.query.get(post_id)
+    if post:
+        author = User.query.filter_by(email=post.author_email).first()
+        if author:
+            author.earnings += 0.05   # P0.05 per ad impression
+            db.session.commit()
     return jsonify({"success": True})
 
 
+@app.route("/api/admin/wipe-posts", methods=["POST"])
+def api_wipe_posts():
+    """Delete every post and reaction. One-time cleanup."""
+    data = request.get_json() or {}
+    if data.get("confirm") != "WIPE":
+        return jsonify({"error": "Send confirm=WIPE to proceed"}), 400
+    UserReaction.query.delete()
+    Post.query.delete()
+    db.session.commit()
+    return jsonify({"success": True, "message": "All posts and reactions deleted."})
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# PAYMENT GATEWAY  (Yellow Card — Africa fiat on/off ramps)
-# ══════════════════════════════════════════════════════════════════════════
+# ---------- Admin Dashboard ----------
+ADMIN_EMAIL = "botsile55@gmail.com"
+BTN_GREEN   = "background:#4DF0C0;color:#030a0e;padding:6px 12px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer"
+BTN_RED     = "background:rgba(240,106,77,0.15);color:#f06a4d;border:1px solid rgba(240,106,77,0.3);padding:6px 12px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer"
+BTN_GREY    = "background:rgba(255,255,255,0.06);color:#8899b4;border:1px solid rgba(255,255,255,0.1);padding:6px 12px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer"
 
-def _apply_side_effects(payment):
-    """Run post-payment actions once a payment is confirmed."""
-    pay_type = payment.payment_type
-    if pay_type == "tip":
-        recipient = User.query.filter_by(email=payment.recipient_email).first()
-        if recipient:
-            recipient.earnings += round(payment.amount_cents * 0.9 / 100, 2)
-            db.session.add(Notification(user_email=recipient.email,
-                text=f"You received a ${payment.amount_cents/100:.2f} tip!"))
-            db.session.commit()
-    elif pay_type == "ad":
-        meta  = _json.loads(payment.metadata_json or "{}")
-        title = meta.get("title", "Ad campaign")
-        imps  = meta.get("impressions", 0)
-        db.session.add(Ad(title=title, owner_email=payment.payer_email,
-                          budget=payment.amount_cents / 100))
-        db.session.add(Notification(user_email=payment.payer_email,
-            text=f"Ad '{title}' is live! (~{imps:,} impressions)"))
-        db.session.commit()
-    elif pay_type == "verified":
-        user = User.query.filter_by(email=payment.payer_email).first()
-        if user:
-            user.verified = 1
-            db.session.add(Notification(user_email=payment.payer_email,
-                text="Your VibeNet Verified badge is now active! ✦"))
-            db.session.commit()
+def require_admin():
+    return session.get("user_email") == ADMIN_EMAIL
 
 
-# ── Gateway status check ─────────────────────────────────────────────────
-@app.route("/api/pay/status")
-def api_pay_status():
-    return jsonify({"configured": _om_ok(),
-                    "environment": OM_ENVIRONMENT,
-                    "country": OM_COUNTRY_CODE,
-                    "currency": OM_CURRENCY})
+@app.route("/admin")
+def admin_page():
+    if not require_admin():
+        return f"""<html><body style="font-family:sans-serif;background:#060910;color:#e8f0ff;padding:40px">
+        <h2 style="color:#f06a4d">Not logged in as admin</h2>
+        <p>You must be logged in as <strong>{ADMIN_EMAIL}</strong> on the main app first.</p>
+        <a href="/" style="color:#4DF0C0">← Go to VibeNet and log in</a>, then return to /admin.
+        </body></html>""", 403
+    try:
+        return _build_admin_page()
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        return f"<html><body style='font-family:monospace;background:#060910;color:#f06a4d;padding:40px;white-space:pre-wrap'>Admin error:\n{err}</body></html>", 500
 
 
-def _om_create_order(amount_usd, phone, reference, description):
-    """Create an Orange Money payment order. Returns (order_id, error_msg)."""
-    # Orange Money uses local currency — convert USD → BWP at a fixed rate
-    # In production you should use a live FX rate. 1 USD ≈ 13.5 BWP (2025)
-    BWP_RATE   = float(os.environ.get("BWP_RATE", "13.5"))
-    amount_bwp = round(amount_usd * BWP_RATE, 2)
-    notify_url = os.environ.get("OM_NOTIFY_URL",
-                                "https://yourdomain.com/api/pay/webhook")
-    payload = {
-        "merchant_key":  OM_MERCHANT_KEY or OM_CLIENT_ID,
-        "currency":      OM_CURRENCY,
-        "order_id":      reference,
-        "amount":        str(amount_bwp),
-        "return_url":    notify_url,
-        "cancel_url":    notify_url,
-        "notif_url":     notify_url,
-        "lang":          "en",
-        "reference":     description,
-        "msisdn":        phone,
-    }
-    result, status = om_post("/webpayment", payload)
-    if status in (200, 201):
-        order_id  = result.get("pay_token") or result.get("order_id") or result.get("id", "")
-        return order_id, None
-    return None, result.get("message", result.get("error", "Could not create order"))
+def _build_admin_page():
+    total_users     = User.query.count()
+    total_posts     = Post.query.count()
+    total_ads       = Ad.query.count()
+    pending_ads     = Ad.query.filter_by(approved=0).count()
+    pending_payouts = PayoutRequest.query.filter_by(status="pending").count()
+    total_earnings  = db.session.query(func.sum(User.earnings)).scalar() or 0
+
+    users   = User.query.order_by(User.created_at.desc()).all()
+    ads     = Ad.query.order_by(Ad.id.desc()).all()
+    payouts = PayoutRequest.query.order_by(PayoutRequest.id.desc()).all()
+
+    def badge(val, labels=("Pending","Approved","Rejected"), colors=("f0c84d","4DF0C0","f06a4d")):
+        COLOR_MAP = {"f0c84d":"240,200,77","4DF0C0":"77,240,192","f06a4d":"240,106,77"}
+        rgb = COLOR_MAP.get(colors[val], "77,240,192")
+        return f'<span style="background:rgba({rgb},0.15);color:#{colors[val]};padding:3px 10px;border-radius:100px;font-size:11px;font-weight:700">{labels[val]}</span>'
+
+    # Build user rows with full insights
+    rows_users = ""
+    for u in users:
+        try:
+            posts_count     = Post.query.filter_by(author_email=u.email).count()
+            followers_count = Follower.query.filter_by(user_email=u.email).count()
+            user_post_ids   = [p.id for p in Post.query.filter_by(author_email=u.email).with_entities(Post.id).all()]
+            reactions_total = UserReaction.query.filter(UserReaction.post_id.in_(user_post_ids)).count() if user_post_ids else 0
+            last_post       = Post.query.filter_by(author_email=u.email).order_by(Post.id.desc()).first()
+            last_post_ts    = last_post.timestamp if last_post else "—"
+            status_badge    = '<span style="color:#4DF0C0;font-size:11px;font-weight:700">✦ Verified</span>' if u.verified else ""
+            ban_badge       = '<span style="color:#f06a4d;font-size:11px;font-weight:700">⛔ Banned</span>' if u.banned else ""
+            rows_users += f"""<tr>
+              <td>
+                <div style="font-weight:600">{u.name or "—"} {status_badge} {ban_badge}</div>
+                <div style="color:#5a6a85;font-size:11px">{u.email}</div>
+              </td>
+              <td style="text-align:center">{posts_count}</td>
+              <td style="text-align:center">{reactions_total}</td>
+              <td style="text-align:center">{followers_count}</td>
+              <td style="text-align:center">{u.watch_hours}</td>
+              <td style="color:#4DF0C0;text-align:center">P{u.earnings:.2f}</td>
+              <td style="color:#5a6a85;font-size:11px">{u.last_active or "—"}</td>
+              <td style="color:#5a6a85;font-size:11px">{last_post_ts}</td>
+              <td>
+                <div style="display:flex;gap:5px;flex-wrap:wrap">
+                  <button onclick=\'verifyUser("{u.email}", {0 if u.verified else 1})\' style=\'{BTN_GREEN if not u.verified else BTN_GREY}\'>{" Unverify" if u.verified else "✦ Verify"}</button>
+                  <button onclick=\'banUser("{u.email}", {0 if u.banned else 1})\' style=\'{BTN_GREY if u.banned else BTN_RED}\'>{" Unban" if u.banned else "⛔ Ban"}</button>
+                  <button onclick=\'deleteUser("{u.email}")\' style=\'{BTN_RED}\'>🗑</button>
+                </div>
+              </td>
+            </tr>"""
+        except Exception as e:
+            rows_users += f'<tr><td colspan="9" style="color:#f06a4d;font-size:12px">Error loading {u.email}: {e}</td></tr>'
+
+    rows_users = rows_users or '<tr><td colspan="9" style="color:#5a6a85;text-align:center;padding:20px">No users</td></tr>'
+
+    rows_ads = "".join(f"""<tr>
+      <td>#{a.id}</td><td>{a.title or "—"}</td>
+      <td style="color:#8899b4;font-size:12px">{a.owner_email}</td>
+      <td>P{a.budget:.2f}</td><td>{a.impressions}</td>
+      <td>{badge(a.approved)}</td>
+      <td style="display:flex;gap:6px;flex-wrap:wrap">
+        {"<button onclick=\'approveAd("+str(a.id)+",1)\' style=\'"+BTN_GREEN+"\'>✓ Approve</button>" if a.approved != 1 else ""}
+        {"<button onclick=\'approveAd("+str(a.id)+",2)\' style=\'"+BTN_RED+"\'>✗ Reject</button>" if a.approved != 2 else ""}
+      </td></tr>""" for a in ads) or '<tr><td colspan="7" style="color:#5a6a85;text-align:center;padding:20px">No campaigns</td></tr>'
+
+    rows_payouts = "".join(f"""<tr>
+      <td>#{p.id}</td>
+      <td>{p.user_name}<br><span style="color:#5a6a85;font-size:11px">{p.user_email}</span></td>
+      <td style="letter-spacing:1px">{p.om_number}</td>
+      <td style="color:#4DF0C0;font-weight:700">P{p.amount:.2f}</td>
+      <td style="color:#5a6a85;font-size:12px">{p.created_at}</td>
+      <td>{"<button onclick=\'markPaid("+str(p.id)+")\' style=\'"+BTN_GREEN+"\'>Mark Paid</button>" if p.status=="pending" else badge(1,("Pending","Paid","Rejected"))}</td>
+    </tr>""" for p in payouts) or '<tr><td colspan="6" style="color:#5a6a85;text-align:center;padding:20px">No payout requests</td></tr>'
+
+    return f"""<!doctype html><html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>VibeNet Admin</title>
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:system-ui,sans-serif;background:#060910;color:#e8f0ff;padding:20px;min-height:100vh}}
+h1{{color:#4DF0C0;font-size:22px;margin-bottom:4px}}
+.sub{{color:#5a6a85;font-size:13px;margin-bottom:28px}}
+.stats{{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;margin-bottom:28px}}
+.stat{{background:#101520;border:1px solid rgba(255,255,255,0.07);border-radius:12px;padding:16px}}
+.stat-l{{font-size:11px;text-transform:uppercase;letter-spacing:0.8px;color:#5a6a85;margin-bottom:6px}}
+.stat-v{{font-size:28px;font-weight:800;color:#4DF0C0}}
+.section{{background:#101520;border:1px solid rgba(255,255,255,0.07);border-radius:14px;padding:20px;margin-bottom:24px;overflow-x:auto}}
+h2{{font-size:15px;font-weight:700;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.07)}}
+table{{width:100%;border-collapse:collapse;font-size:13px;min-width:600px}}
+th{{text-align:left;color:#5a6a85;font-weight:600;padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.06);white-space:nowrap}}
+td{{padding:10px;border-bottom:1px solid rgba(255,255,255,0.04);vertical-align:middle}}
+tr:last-child td{{border-bottom:none}}
+button{{border:none;padding:6px 12px;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}}
+button:hover{{opacity:0.8}}
+a{{color:#4DF0C0;text-decoration:none;font-size:13px}}
+</style></head><body>
+<h1>⚡ VibeNet Admin</h1>
+<div class="sub">Signed in as {ADMIN_EMAIL} · <a href="/">← Back to app</a></div>
+
+<div class="stats">
+  <div class="stat"><div class="stat-l">Users</div><div class="stat-v">{total_users}</div></div>
+  <div class="stat"><div class="stat-l">Posts</div><div class="stat-v">{total_posts}</div></div>
+  <div class="stat"><div class="stat-l">All Ads</div><div class="stat-v">{total_ads}</div></div>
+  <div class="stat"><div class="stat-l">Pending Ads</div><div class="stat-v" style="color:#f0c84d">{pending_ads}</div></div>
+  <div class="stat"><div class="stat-l">Pending Payouts</div><div class="stat-v" style="color:#f0c84d">{pending_payouts}</div></div>
+  <div class="stat"><div class="stat-l">Total Earned</div><div class="stat-v">P{total_earnings:.2f}</div></div>
+</div>
+
+<div class="section">
+  <h2>👥 Users & Insights</h2>
+  <table>
+    <tr><th>User</th><th>Posts</th><th>Reactions</th><th>Followers</th><th>Watch Hrs</th><th>Earnings</th><th>Last Active</th><th>Last Post</th><th>Actions</th></tr>
+    {rows_users}
+  </table>
+</div>
+
+<div class="section">
+  <h2>📣 Ad Campaigns</h2>
+  <table><tr><th>ID</th><th>Title</th><th>Owner</th><th>Budget</th><th>Impressions</th><th>Status</th><th>Actions</th></tr>
+  {rows_ads}</table>
+</div>
+
+<div class="section">
+  <h2>💸 Payout Requests</h2>
+  <table><tr><th>ID</th><th>User</th><th>OM Number</th><th>Amount</th><th>Date</th><th>Status</th></tr>
+  {rows_payouts}</table>
+</div>
+
+<script>
+async function approveAd(id, status){{
+  const r = await fetch('/api/admin/ads/'+id+'/approve',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{status}})}});
+  const j = await r.json();
+  if(j.success) location.reload(); else alert(j.error||'Failed');
+}}
+async function markPaid(id){{
+  const r = await fetch('/api/admin/payout/'+id+'/mark-paid',{{method:'POST'}});
+  const j = await r.json();
+  if(j.success) location.reload(); else alert(j.error||'Failed');
+}}
+async function banUser(email, val){{
+  if(val && !confirm('Ban '+email+'?')) return;
+  const r = await fetch('/api/admin/user/ban',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email,val}})}});
+  const j = await r.json();
+  if(j.success) location.reload(); else alert(j.error||'Failed');
+}}
+async function verifyUser(email, val){{
+  const r = await fetch('/api/admin/user/verify',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email,val}})}});
+  const j = await r.json();
+  if(j.success) location.reload(); else alert(j.error||'Failed');
+}}
+async function deleteUser(email){{
+  if(!confirm('Permanently delete '+email+' and all their content?')) return;
+  const r = await fetch('/api/admin/user/delete',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{email}})}});
+  const j = await r.json();
+  if(j.success) location.reload(); else alert(j.error||'Failed');
+}}
+</script></body></html>"""
 
 
-# ── Tip a creator ─────────────────────────────────────────────────────────
-@app.route("/api/pay/tip", methods=["POST"])
-def api_pay_tip():
-    if not _om_ok():
-        return jsonify({"error": "Orange Money not configured. Set OM_CLIENT_ID and OM_CLIENT_SECRET."}), 503
-    data       = request.get_json() or {}
-    payer      = data.get("payer", "")
-    recipient  = data.get("recipient", "").strip().lower()
-    amount_usd = float(data.get("amount_usd", 0))
-    phone      = data.get("phone", "")
-    if amount_usd < PRICE_TIP_MIN_USD:
-        return jsonify({"error": f"Minimum tip is ${PRICE_TIP_MIN_USD:.2f}"}), 400
-    if not phone:
-        return jsonify({"error": "Orange Money phone number required"}), 400
-    recipient_user = User.query.filter_by(email=recipient).first()
-    if not recipient_user:
-        return jsonify({"error": "Creator not found"}), 404
-    amount_cents = int(round(amount_usd * 100))
-    payment = Payment(payer_email=payer, recipient_email=recipient,
-        amount_cents=amount_cents, payment_type="tip",
-        metadata_json=_json.dumps({"recipient_name": recipient_user.name or recipient,
-                                    "phone": phone}))
-    db.session.add(payment); db.session.commit()
-    order_id, err = _om_create_order(amount_usd, phone,
-        f"tip-{payment.id}", f"VibeNet tip to {recipient_user.name or recipient}")
-    if err:
-        payment.status = "failed"; db.session.commit()
-        return jsonify({"error": err}), 402
-    payment.om_order_id = order_id; db.session.commit()
-    return jsonify({"order_id": order_id, "id": order_id})
+@app.route("/api/admin/ads/<int:ad_id>/approve", methods=["POST"])
+def api_admin_approve_ad(ad_id):
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    data = request.get_json() or {}
+    ad   = Ad.query.get_or_404(ad_id)
+    ad.approved = data.get("status", 1)
+    db.session.commit()
+    return jsonify({"success": True})
 
 
-# ── Advertise ─────────────────────────────────────────────────────────────
-@app.route("/api/pay/ad", methods=["POST"])
-def api_pay_ad():
-    if not _om_ok():
-        return jsonify({"error": "Orange Money not configured."}), 503
-    data       = request.get_json() or {}
-    payer      = data.get("payer", "")
-    title      = data.get("title", "").strip()
-    budget_usd = float(data.get("budget_usd", 0))
-    phone      = data.get("phone", "")
-    if budget_usd < PRICE_AD_CPM_USD:
-        return jsonify({"error": f"Minimum ad budget is ${PRICE_AD_CPM_USD:.2f}"}), 400
-    if not title:
-        return jsonify({"error": "Campaign title required"}), 400
-    if not phone:
-        return jsonify({"error": "Orange Money phone number required"}), 400
-    amount_cents    = int(round(budget_usd * 100))
-    est_impressions = int((budget_usd / PRICE_AD_CPM_USD) * 1000)
-    payment = Payment(payer_email=payer, recipient_email="",
-        amount_cents=amount_cents, payment_type="ad",
-        metadata_json=_json.dumps({"title": title, "impressions": est_impressions,
-                                    "phone": phone}))
-    db.session.add(payment); db.session.commit()
-    order_id, err = _om_create_order(budget_usd, phone,
-        f"ad-{payment.id}", f"VibeNet Ad: {title}")
-    if err:
-        payment.status = "failed"; db.session.commit()
-        return jsonify({"error": err}), 402
-    payment.om_order_id = order_id; db.session.commit()
-    return jsonify({"order_id": order_id, "id": order_id, "impressions": est_impressions})
+@app.route("/api/admin/payout/<int:payout_id>/mark-paid", methods=["POST"])
+def api_admin_mark_paid(payout_id):
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    pr = PayoutRequest.query.get_or_404(payout_id)
+    pr.status = "paid"
+    db.session.commit()
+    return jsonify({"success": True})
 
 
-# ── VibeNet Verified ──────────────────────────────────────────────────────
-@app.route("/api/pay/verified", methods=["POST"])
-def api_pay_verified():
-    if not _om_ok():
-        return jsonify({"error": "Orange Money not configured."}), 503
+@app.route("/api/admin/user/ban", methods=["POST"])
+def api_admin_ban_user():
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
     data  = request.get_json() or {}
-    payer = data.get("payer", "")
-    phone = data.get("phone", "")
-    user  = User.query.filter_by(email=payer).first()
+    email = data.get("email", "").strip()
+    val   = int(data.get("val", 1))
+    user  = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({"error": "User not found"}), 404
-    if user.verified:
-        return jsonify({"already_verified": True})
-    if not phone:
-        return jsonify({"error": "Orange Money phone number required"}), 400
-    payment = Payment(payer_email=payer, recipient_email="",
-        amount_cents=int(PRICE_VERIFIED_USD * 100), payment_type="verified",
-        metadata_json=_json.dumps({"phone": phone}))
-    db.session.add(payment); db.session.commit()
-    order_id, err = _om_create_order(PRICE_VERIFIED_USD, phone,
-        f"verified-{payment.id}", "VibeNet Verified Badge")
-    if err:
-        payment.status = "failed"; db.session.commit()
-        return jsonify({"error": err}), 402
-    payment.om_order_id = order_id; db.session.commit()
-    return jsonify({"order_id": order_id, "id": order_id})
+    user.banned = val
+    db.session.commit()
+    return jsonify({"success": True})
 
 
-# ── OTP Confirmation ──────────────────────────────────────────────────────
-@app.route("/api/pay/confirm", methods=["POST"])
-def api_pay_confirm():
-    """Submit the OTP the user got via USSD to finalise the payment."""
-    if not _om_ok():
-        return jsonify({"error": "Orange Money not configured."}), 503
-    data     = request.get_json() or {}
-    order_id = data.get("order_id", "")
-    otp      = data.get("otp", "").strip()
-    payer    = data.get("payer", "")
-    if not order_id or not otp:
-        return jsonify({"error": "order_id and otp are required"}), 400
-    payment = Payment.query.filter_by(om_order_id=order_id, payer_email=payer).first()
-    if not payment:
-        return jsonify({"error": "Payment not found"}), 404
-    # Send OTP to Orange Money to complete the transaction
-    result, status = om_post("/webpayment", {
-        "pay_token":     order_id,
-        "otp_code":      otp,
-        "merchant_key":  OM_MERCHANT_KEY or OM_CLIENT_ID,
+@app.route("/api/admin/user/verify", methods=["POST"])
+def api_admin_verify_user():
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    data  = request.get_json() or {}
+    email = data.get("email", "").strip()
+    val   = int(data.get("val", 1))
+    user  = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    user.verified = val
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+@app.route("/api/admin/user/delete", methods=["POST"])
+def api_admin_delete_user():
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    data  = request.get_json() or {}
+    email = data.get("email", "").strip()
+    if email == ADMIN_EMAIL:
+        return jsonify({"error": "Cannot delete admin account"}), 403
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    # Delete all user content
+    post_ids = [p.id for p in Post.query.filter_by(author_email=email).all()]
+    if post_ids:
+        UserReaction.query.filter(UserReaction.post_id.in_(post_ids)).delete(synchronize_session=False)
+    Post.query.filter_by(author_email=email).delete()
+    Follower.query.filter_by(user_email=email).delete()
+    Follower.query.filter_by(follower_email=email).delete()
+    Notification.query.filter_by(user_email=email).delete()
+    PayoutRequest.query.filter_by(user_email=email).delete()
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({"success": True})
+
+
+# ---------- Admin Management (API) ----------
+@app.route("/api/admin/stats")
+def api_admin_stats():
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    return jsonify({
+        "users":                  User.query.count(),
+        "posts":                  Post.query.count(),
+        "pending_payouts":        PayoutRequest.query.filter_by(status="pending").count(),
+        "platform_earnings_hold": round(db.session.query(func.sum(User.earnings)).scalar() or 0, 2),
+        "pending_ads":            Ad.query.filter_by(approved=0).count(),
     })
-    if status in (200, 201) and result.get("status") in ("SUCCESS", "SUCCESSFULL", "success", "200"):
-        payment.status       = "paid"
-        payment.om_reference = result.get("txn_id", result.get("reference", ""))
-        db.session.commit()
-        _apply_side_effects(payment)
-        meta = _json.loads(payment.metadata_json or "{}")
-        return jsonify({"success": True,
-                        "impressions": meta.get("impressions", 0),
-                        "reference": payment.om_reference})
-    else:
-        msg = result.get("message", result.get("error", "OTP confirmation failed"))
-        return jsonify({"error": msg}), 402
 
 
-# ── Webhook (Orange Money notif_url callback) ─────────────────────────────
-@app.route("/api/pay/webhook", methods=["POST"])
-def api_pay_webhook():
-    payload  = request.get_json(force=True) or {}
-    status   = (payload.get("status") or payload.get("txn_status") or "").upper()
-    order_id = payload.get("order_id") or payload.get("pay_token", "")
-    if order_id:
-        payment = Payment.query.filter_by(om_order_id=order_id).first()
-        if payment:
-            if status in ("SUCCESS", "SUCCESSFULL"):
-                payment.status       = "paid"
-                payment.om_reference = payload.get("txn_id", "")
-                db.session.commit()
-                _apply_side_effects(payment)
-            elif status in ("FAILED", "CANCELLED", "EXPIRED"):
-                payment.status = "failed"
-                db.session.commit()
-    return jsonify({"received": True})
+@app.route("/api/admin/users")
+def api_admin_users():
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    users = User.query.order_by(User.id.desc()).all()
+    return jsonify([u.to_dict() for u in users])
 
 
-# ── Payment history ───────────────────────────────────────────────────────
-@app.route("/api/pay/history")
-def api_pay_history():
-    email    = request.args.get("email", "")
-    payments = Payment.query.filter_by(payer_email=email).order_by(Payment.id.desc()).limit(50).all()
-    return jsonify([p.to_dict() for p in payments])
+@app.route("/api/admin/user/<int:user_id>/action", methods=["POST"])
+def api_admin_user_action(user_id):
+    if not require_admin():
+        return jsonify({"error": "Unauthorized"}), 403
+    data   = request.get_json() or {}
+    action = data.get("action")  # verify | unverify | ban | unban
+    user   = User.query.get(user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    if action == "verify":     user.verified = 1
+    elif action == "unverify": user.verified = 0
+    elif action == "ban":      user.banned = 1
+    elif action == "unban":    user.banned = 0
+    else: return jsonify({"error": "Unknown action"}), 400
+    db.session.commit()
+    return jsonify({"success": True, "message": f"User {action}ed successfully"})
 
 
-# ---------- Payment result pages ----------
-@app.route("/payment/success")
-def payment_success():
-    ptype = request.args.get("type", "payment")
-    msgs  = {
-        "tip":      "Your tip was sent successfully!",
-        "ad":       "Your ad campaign is now live!",
-        "verified": "You are now VibeNet Verified! ✦",
-    }
-    msg = msgs.get(ptype, "Payment successful!")
-    return render_template_string("""
-<!doctype html><html><head><meta charset=utf-8>
-<title>Payment Success</title>
-<style>
-  body{background:#060910;color:#E8F0FF;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-  .box{text-align:center;padding:48px;background:#101520;border-radius:20px;border:1px solid rgba(77,240,192,0.3)}
-  h1{color:#4DF0C0;font-size:2rem;margin-bottom:12px}
-  p{color:#8899B4;margin-bottom:24px}
-  a{color:#4DF0C0;text-decoration:none;font-weight:600}
-</style></head><body>
-<div class="box"><h1>✦ {{ msg }}</h1><p>Your payment has been processed.</p><a href="/">← Back to VibeNet</a></div>
-</body></html>""", msg=msg)
+# ---------- Payout Requests ----------
+@app.route("/api/payout", methods=["POST"])
+def api_payout_request():
+    data      = request.get_json() or {}
+    email     = data.get("email", "").strip()
+    om_number = data.get("om_number", "").strip()
+    amount    = float(data.get("amount", 0))
+    if not email or not om_number or amount <= 0:
+        return jsonify({"error": "Missing fields"}), 400
+    user = User.query.filter_by(email=email).first()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    # Must be eligible: 1K followers + 4K watch hours
+    followers = Follower.query.filter_by(user_email=email).count()
+    if followers < 1000 or user.watch_hours < 4000:
+        return jsonify({"error": f"You need 1,000 followers and 4,000 watch hours to request a payout. You have {followers} followers and {user.watch_hours} watch hours."}), 403
+    if user.earnings < amount:
+        return jsonify({"error": f"Insufficient balance. Your earnings are P{user.earnings:.2f}"}), 400
+    user.earnings -= amount
+    pr = PayoutRequest(user_email=email, user_name=user.name or "",
+                       om_number=om_number, amount=amount, status="pending")
+    db.session.add(pr)
+    db.session.commit()
+    return jsonify({"success": True, "message": f"Payout of P{amount:.2f} requested. You'll receive it on {om_number} within 24–48hrs."})
 
 
-@app.route("/payment/cancel")
-def payment_cancel():
-    return render_template_string("""
-<!doctype html><html><head><meta charset=utf-8>
-<title>Payment Cancelled</title>
-<style>
-  body{background:#060910;color:#E8F0FF;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
-  .box{text-align:center;padding:48px;background:#101520;border-radius:20px;border:1px solid rgba(240,106,77,0.3)}
-  h1{color:#F06A4D;font-size:2rem;margin-bottom:12px}
-  p{color:#8899B4;margin-bottom:24px}
-  a{color:#4DF0C0;text-decoration:none;font-weight:600}
-</style></head><body>
-<div class="box"><h1>Payment Cancelled</h1><p>No charge was made.</p><a href="/">← Back to VibeNet</a></div>
-</body></html>""")
+@app.route("/api/payout/history/<email>")
+def api_payout_history(email):
+    items = PayoutRequest.query.filter_by(user_email=email).order_by(PayoutRequest.id.desc()).all()
+    return jsonify([r.to_dict() for r in items])
 
+
+
+
+# ══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=app.config["PORT"], debug=True)
