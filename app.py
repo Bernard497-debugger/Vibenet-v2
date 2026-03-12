@@ -2871,18 +2871,41 @@ def api_posts():
         })
 
     data = request.get_json() or {}
+    
+    # Validate required fields
+    author_email = data.get("author_email", "").strip().lower()
+    if not author_email:
+        return jsonify({"error": "author_email required"}), 400
+    
+    # Check user exists
+    user = User.query.filter_by(email=author_email).first()
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    
+    # Check if banned
+    if user.banned:
+        return jsonify({"error": "Account banned"}), 403
+    
+    # Check post has content (text OR file)
+    text = data.get("text", "").strip()
+    file_url = data.get("file_url", "").strip()
+    
+    if not text and not file_url:
+        return jsonify({"error": "Post must have text or file"}), 400
+    
+    # Create post
     post = Post(
-        author_email=data.get("author_email"),
-        author_name=data.get("author_name"),
-        profile_pic=data.get("profile_pic", ""),
-        text=data.get("text", ""),
-        file_url=data.get("file_url", ""),
+        author_email=author_email,
+        author_name=data.get("author_name", user.name),
+        profile_pic=data.get("profile_pic", user.profile_pic),
+        text=text,
+        file_url=file_url,
         file_mime=data.get("file_mime", ""),
         thumbnail_url=data.get("thumbnail_url", ""),
     )
     db.session.add(post)
     db.session.commit()
-    return jsonify(post.to_dict())
+    return jsonify(post.to_dict()), 201
 
 
 @app.route("/api/posts/<int:post_id>", methods=["DELETE", "PATCH"])
