@@ -1969,24 +1969,11 @@ async function uploadFile(file, folder='vibenet/posts'){
   let fileToUpload = file;
   let thumbnailBlob = null;
   
-  console.log('🎬 uploadFile called:', file.name, 'size:', file.size);
+  console.log('🎬 uploadFile called:', file.name, 'size:', file.size, 'type:', file.type);
   
   try {
-    // Compress video if larger than 10MB
-    if(isVideo && file.size > 10 * 1024 * 1024){
-      showUploadProgress(true, `Compressing video (${(file.size/1024/1024).toFixed(1)}MB)...`);
-      try {
-        fileToUpload = await compressVideo(file);
-        showUploadProgress(true, `Extracting thumbnail...`);
-        thumbnailBlob = await extractVideoThumbnail(fileToUpload);
-        showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
-      } catch(compressionError) {
-        console.warn('⚠️ Compression/thumbnail failed, uploading original:', compressionError);
-        fileToUpload = file;
-        thumbnailBlob = null;
-        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
-      }
-    } else if(isVideo) {
+    // ALWAYS compress videos to MP4 H.264 for universal compatibility
+    if(isVideo){
       showUploadProgress(true, `Extracting thumbnail...`);
       try {
         thumbnailBlob = await extractVideoThumbnail(file);
@@ -1999,7 +1986,20 @@ async function uploadFile(file, folder='vibenet/posts'){
         console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
         thumbnailBlob = null;
       }
-      showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+      
+      // ALWAYS compress video - ensures H.264/MP4 compatibility
+      showUploadProgress(true, `Compressing video to MP4 (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      try {
+        console.log('📦 Starting compression...');
+        fileToUpload = await compressVideo(file);
+        console.log('✅ Compression done:', fileToUpload.size, 'bytes');
+        showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+      } catch(compressionError) {
+        console.error('❌ Compression failed:', compressionError);
+        console.error('Stack:', compressionError.stack);
+        // Try to upload original anyway
+        showUploadProgress(true, `Uploading original video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      }
     } else {
       showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     }
