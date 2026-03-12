@@ -2056,22 +2056,77 @@ async function requestPayout(){
 
 async function addPost(){
   if(!currentUser){ alert('Please login first.'); return; }
+  
   const text = byId('postText').value.trim();
   const fileEl = byId('fileUpload');
   let url = '', mime = '', thumbnail = '';
+  
   if(fileEl.files[0]){
     mime = fileEl.files[0].type;
-    const result = await uploadFile(fileEl.files[0]);
-    url = result.url;
-    thumbnail = result.thumbnail;
+    try {
+      const result = await uploadFile(fileEl.files[0]);
+      url = result.url;
+      thumbnail = result.thumbnail;
+    } catch(e) {
+      console.error('Upload failed:', e);
+      alert('Upload failed, post text only: ' + e.message);
+      url = '';
+    }
   }
-  if(!text && !url) return;
-  await fetch(API + '/posts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
-    author_email: currentUser.email, author_name: currentUser.name,
-    profile_pic: currentUser.profile_pic||'', text, file_url: url, file_mime: mime, thumbnail_url: thumbnail
-  })});
-  byId('postText').value=''; fileEl.value=''; byId('fileNameDisplay').textContent='';
-  await loadFeed(true); await loadProfilePosts(); await loadMonetization();
+  
+  if(!text && !url){ 
+    alert('Please write something or attach a file'); 
+    return; 
+  }
+  
+  // Show posting state
+  const btn = byId('postBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Posting...';
+  
+  try {
+    const res = await fetch(API + '/posts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        author_email: currentUser.email,
+        author_name: currentUser.name,
+        profile_pic: currentUser.profile_pic || '',
+        text,
+        file_url: url,
+        file_mime: mime,
+        thumbnail_url: thumbnail
+      })
+    });
+    
+    const j = await res.json();
+    
+    if(res.status === 201 || res.status === 200){
+      // Success
+      console.log('Post created:', j);
+      byId('postText').value = '';
+      fileEl.value = '';
+      byId('fileNameDisplay').textContent = '';
+      btn.textContent = 'Post →';
+      btn.disabled = false;
+      
+      // Refresh everything
+      await loadFeed(true);
+      await loadProfilePosts();
+      await loadMonetization();
+    } else {
+      // Error from backend
+      console.error('Post failed:', j);
+      alert('❌ ' + (j.error || 'Failed to post'));
+      btn.textContent = 'Post →';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    console.error('Network error:', e);
+    alert('⚠️ Network error: ' + e.message);
+    btn.textContent = 'Post →';
+    btn.disabled = false;
+  }
 }
 
 function createPostElement(p){
