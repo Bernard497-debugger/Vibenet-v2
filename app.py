@@ -1969,6 +1969,8 @@ async function uploadFile(file, folder='vibenet/posts'){
   let fileToUpload = file;
   let thumbnailBlob = null;
   
+  console.log('🎬 uploadFile called:', file.name, 'size:', file.size);
+  
   try {
     // Compress video if larger than 10MB
     if(isVideo && file.size > 10 * 1024 * 1024){
@@ -1989,7 +1991,7 @@ async function uploadFile(file, folder='vibenet/posts'){
       try {
         thumbnailBlob = await extractVideoThumbnail(file);
         if(thumbnailBlob) {
-          console.log('✅ Thumbnail created');
+          console.log('✅ Thumbnail created:', thumbnailBlob.size, 'bytes');
         } else {
           console.warn('⚠️ Thumbnail is null, continuing without');
         }
@@ -2002,91 +2004,50 @@ async function uploadFile(file, folder='vibenet/posts'){
       showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     }
     
-    // Now upload using Supabase JS SDK (direct upload)
-    try {
-      // Initialize Supabase client
-      const supabaseUrl = 'https://gxbwyxoxmkfiodsvmmnb.supabase.co';
-      const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4Ynd5eG94bWtmaW9kc3ZtbW5iIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDgyNDgzODUsImV4cCI6MjAyMzg0ODM4NX0.Oi-1uJzx8vN1DkfHwL7gH8OvPv5n5QqQ5QqQ5QqQ5QqQ';
-      
-      const { createClient } = window.supabase;
-      const sbClient = createClient(supabaseUrl, supabaseKey);
-      
-      // Generate unique filename
-      const timestamp = Date.now();
-      const random = Math.random().toString(36).substring(7);
-      const ext = fileToUpload.name.split('.').pop() || 'bin';
-      const filename = `${timestamp}-${random}.${ext}`;
-      const filepath = `posts/${filename}`;
-      
-      console.log('📤 Uploading to Supabase:', filepath);
-      
-      // Upload file
-      const { data, error } = await sbClient.storage
-        .from('Vibenet')
-        .upload(filepath, fileToUpload, {
-          cacheControl: '3600',
-          upsert: false
-        });
-      
-      if(error) {
-        console.error('❌ Supabase upload error:', error);
-        throw new Error(error.message);
-      }
-      
-      console.log('✅ File uploaded:', data);
-      
-      // Get public URL
-      const { data: publicData } = sbClient.storage
-        .from('Vibenet')
-        .getPublicUrl(filepath);
-      
-      const publicUrl = publicData.publicUrl;
-      console.log('✅ Public URL:', publicUrl);
-      
-      // Upload thumbnail if available
-      let thumbnailUrl = '';
-      if(thumbnailBlob) {
-        try {
-          const thumbExt = 'jpg';
-          const thumbFilename = `${timestamp}-${random}-thumb.${thumbExt}`;
-          const thumbPath = `posts/${thumbFilename}`;
-          
-          const { data: thumbData, error: thumbError } = await sbClient.storage
-            .from('Vibenet')
-            .upload(thumbPath, thumbnailBlob, {
-              cacheControl: '3600',
-              upsert: false
-            });
-          
-          if(thumbError) {
-            console.warn('⚠️ Thumbnail upload failed:', thumbError);
-          } else {
-            const { data: thumbPublic } = sbClient.storage
-              .from('Vibenet')
-              .getPublicUrl(thumbPath);
-            thumbnailUrl = thumbPublic.publicUrl;
-            console.log('✅ Thumbnail URL:', thumbnailUrl);
-          }
-        } catch(e) {
-          console.warn('⚠️ Thumbnail upload exception:', e);
-        }
-      }
-      
-      showUploadProgress(false);
-      return {
-        url: publicUrl,
-        thumbnail: thumbnailUrl
-      };
-      
-    } catch(supabaseError) {
-      console.error('❌ Supabase error:', supabaseError.message);
-      showUploadProgress(false);
+    console.log('📦 File ready for upload:', fileToUpload.name, fileToUpload.size, 'bytes');
+    
+    // Upload via our backend (simpler, more reliable)
+    const fd = new FormData();
+    fd.append('file', fileToUpload);
+    if(thumbnailBlob) {
+      fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
+      console.log('📸 Adding thumbnail to FormData');
+    }
+    
+    console.log('🌐 Posting to:', API + '/upload');
+    
+    const res = await fetch(API + '/upload', {
+      method: 'POST',
+      body: fd
+    });
+    
+    console.log('📡 Response status:', res.status);
+    
+    const j = await res.json();
+    console.log('📡 Response body:', j);
+    
+    showUploadProgress(false);
+    
+    if(j.error) {
+      console.error('❌ Upload error from server:', j.error);
       return {url: '', thumbnail: ''};
     }
     
+    if(!j.url) {
+      console.error('❌ No URL in response:', j);
+      return {url: '', thumbnail: ''};
+    }
+    
+    console.log('✅ Upload successful:', {url: j.url, thumbnail: j.thumbnail});
+    return {
+      url: j.url || '',
+      thumbnail: j.thumbnail || ''
+    };
+    
   } catch(uploadError) {
     showUploadProgress(false);
-    console.error('❌ Upload caught error:', uploadError.message);
+    console.error('❌ Upload exception:', uploadError);
+    console.error('❌ Stack:', uploadError.stack);
     return {url: '', thumbnail: ''};
   }
 }
