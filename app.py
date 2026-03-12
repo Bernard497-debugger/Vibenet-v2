@@ -3084,38 +3084,47 @@ def api_update_profile_pic():
     user  = User.query.filter_by(email=email).first()
     if not user:
         return jsonify({"error": "User not found"}), 404
+    
     data = f.read()
     if len(data) > 5 * 1024 * 1024:
         return jsonify({"error": "Image too large (max 5MB)"}), 400
     mime = f.mimetype or "image/jpeg"
 
-    # Try Cloudinary first
-    if _cloudinary_ok():
+    # Try Supabase first (preferred)
+    if _supabase_ok():
         try:
-            import io
-            result = cloudinary.uploader.upload(
-                io.BytesIO(data),
-                folder        = "vibenet/avatars",
-                resource_type = "image",
-                quality       = "auto",
-                fetch_format  = "auto",
-            )
-            url = result.get("secure_url", "")
-            user.profile_pic = url
-            db.session.commit()
-            return jsonify({"success": True, "profile_pic": url})
+            file_id = uuid.uuid4().hex
+            file_path = f"avatars/{file_id}.jpg"
+            
+            headers = {
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": mime,
+            }
+            url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
+            
+            response = requests.post(url, data=data, headers=headers, timeout=60)
+            
+            if response.status_code in (200, 201):
+                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
+                user.profile_pic = public_url
+                db.session.commit()
+                return jsonify({"success": True, "profile_pic": public_url})
         except Exception as e:
-            print(f"Cloudinary avatar upload failed: {e}, falling back to DB")
+            print(f"Supabase avatar upload failed: {e}, falling back to base64")
 
     # Fallback: store as base64 in DB
-    import base64
-    b64      = base64.b64encode(data).decode("utf-8")
-    media_id = uuid.uuid4().hex
-    mf = MediaFile(id=media_id, mime=mime, data=b64)
-    db.session.add(mf)
-    user.profile_pic = f"/media/{media_id}"
-    db.session.commit()
-    return jsonify({"success": True, "profile_pic": user.profile_pic})
+    try:
+        import base64
+        b64      = base64.b64encode(data).decode("utf-8")
+        media_id = uuid.uuid4().hex
+        mf = MediaFile(id=media_id, mime=mime, data=b64)
+        db.session.add(mf)
+        user.profile_pic = f"/media/{media_id}"
+        db.session.commit()
+        return jsonify({"success": True, "profile_pic": user.profile_pic})
+    except Exception as e:
+        print(f"Base64 fallback failed: {e}")
+        return jsonify({"error": "Upload failed"}), 500
 
 
 # ---------- Following ----------
