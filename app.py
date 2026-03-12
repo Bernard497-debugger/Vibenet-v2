@@ -17,14 +17,13 @@ SUPABASE_BUCKET = os.environ.get("SUPABASE_BUCKET", "vibenet")
 def _supabase_ok():
     return bool(SUPABASE_URL and SUPABASE_KEY)
 
-
 # ---------- Config ----------
 APP_DIR   = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(APP_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024
 app.config["PORT"] = int(os.environ.get("PORT", 5000))
 app.secret_key = os.environ.get("SECRET_KEY", "vibenet_secret_dev")
 
@@ -80,9 +79,6 @@ class User(db.Model):
     earnings          = db.Column(db.Float, default=0.0)
     verified          = db.Column(db.Integer, default=0)
     banned            = db.Column(db.Integer, default=0)
-    email_verified    = db.Column(db.Integer, default=0)
-    phone             = db.Column(db.Text, default="")
-    phone_verified    = db.Column(db.Integer, default=0)
     last_active       = db.Column(db.Text, default="")
     created_at        = db.Column(db.Text, default=lambda: now_ts())
 
@@ -93,9 +89,6 @@ class User(db.Model):
             "watch_hours": self.watch_hours, "earnings": self.earnings,
             "verified": bool(self.verified),
             "banned": bool(self.banned),
-            "email_verified": bool(self.email_verified),
-            "phone": self.phone or "",
-            "phone_verified": bool(self.phone_verified),
             "last_active": self.last_active or "",
         }
 
@@ -120,7 +113,6 @@ class Post(db.Model):
     text           = db.Column(db.Text, default="")
     file_url       = db.Column(db.Text, default="")
     file_mime      = db.Column(db.Text, default="")
-    thumbnail_url  = db.Column(db.Text, default="")
     timestamp      = db.Column(db.Text, default=lambda: now_ts())
     reactions_json = db.Column(db.Text, default='{"👍":0,"❤️":0,"😂":0}')
     comments_count = db.Column(db.Integer, default=0)
@@ -136,8 +128,8 @@ class Post(db.Model):
             "id": self.id, "author_email": self.author_email,
             "author_name": self.author_name, "profile_pic": self.profile_pic,
             "text": self.text, "file_url": self.file_url, "file_mime": self.file_mime or "",
-            "thumbnail_url": self.thumbnail_url or "", "timestamp": self.timestamp, 
-            "reactions": self.reactions(), "comments_count": self.comments_count,
+            "timestamp": self.timestamp, "reactions": self.reactions(),
+            "comments_count": self.comments_count,
             "user_reaction": user_reaction, "author_verified": author_verified,
         }
 
@@ -164,23 +156,6 @@ class Notification(db.Model):
 
     def to_dict(self):
         return {"id": self.id, "text": self.text, "timestamp": self.timestamp, "seen": self.seen}
-
-
-class EmailVerificationToken(db.Model):
-    __tablename__ = "email_verification_tokens"
-    id         = db.Column(db.Integer, primary_key=True)
-    email      = db.Column(db.Text, nullable=False)
-    token      = db.Column(db.Text, unique=True, nullable=False)
-    created_at = db.Column(db.Text, default=lambda: now_ts())
-    expires_at = db.Column(db.Text, default="")  # Token expiration time (24 hours)
-
-
-class PhoneVerificationToken(db.Model):
-    __tablename__ = "phone_verification_tokens"
-    id        = db.Column(db.Integer, primary_key=True)
-    phone     = db.Column(db.Text, nullable=False)
-    otp       = db.Column(db.Text, nullable=False)  # 6-digit code
-    created_at = db.Column(db.Text, default=lambda: now_ts())
 
 
 class Ad(db.Model):
@@ -1513,6 +1488,7 @@ body::after {
   .app-layout { padding: 16px 10px; }
 }
 </style>
+<script async src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
 </head>
 <body>
 
@@ -1554,7 +1530,7 @@ body::after {
           <div class="field-label">Profile photo (optional)</div>
           <input id="signupPic" type="file" accept="image/*" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--muted2);width:100%;font-size:13px;" />
         </div>
-        <button class="btn-primary" onclick="this.disabled=true; this.textContent='⏳ Creating...'; signup();" style="width:100%;margin-top:4px;">Create Account →</button>
+        <button class="btn-primary" onclick="signup()" style="width:100%;margin-top:4px;">Create Account →</button>
         <div style="text-align:center;margin-top:14px;font-size:12px;color:#5a6a85">Already have an account? <span onclick="switchAuthTab('login')" style="color:var(--accent);cursor:pointer;font-weight:600">Sign In</span></div>
       </div>
 
@@ -1750,31 +1726,6 @@ body::after {
         <div class="monet-section-title">My Posts</div>
         <div id="profilePosts"></div>
 
-        <div class="monet-section-title" style="margin-top:24px">✉️ Email Verification</div>
-        <div style="background:rgba(100,200,255,0.04);border:1px solid rgba(100,200,255,0.15);border-radius:14px;padding:18px;margin-bottom:16px">
-          <div id="emailVerifyStatus" style="font-size:13px;color:#8899b4;margin-bottom:12px">Loading...</div>
-          <div id="emailVerifyForm" style="display:none">
-            <div style="font-size:13px;color:#c8d8f0;margin-bottom:14px">Verify your email address to unlock full access to VibeNet features.</div>
-            <button onclick="sendEmailVerification()" class="btn-primary" style="width:100%">Send Verification Email</button>
-            <div id="emailMsg" style="display:none;margin-top:10px;font-size:13px;line-height:1.6"></div>
-          </div>
-        </div>
-
-        <div class="monet-section-title" style="margin-top:24px">📱 Phone Verification</div>
-        <div style="background:rgba(100,200,255,0.04);border:1px solid rgba(100,200,255,0.15);border-radius:14px;padding:18px;margin-bottom:16px">
-          <div id="phoneVerifyStatus" style="font-size:13px;color:#8899b4;margin-bottom:12px">Loading...</div>
-          <div id="phoneVerifyForm" style="display:none">
-            <div style="font-size:13px;color:#c8d8f0;margin-bottom:14px">Verify your phone number to prove you're real on VibeNet.</div>
-            <input type="text" id="phoneInput" placeholder="+267 XX XXX XXXX" style="width:100%;padding:10px;border:1px solid #4a5f7f;border-radius:8px;background:#0d1117;color:#c8d8f0;margin-bottom:10px;font-size:13px">
-            <button onclick="sendPhoneOTP()" class="btn-primary" style="width:100%;margin-bottom:10px">Send OTP</button>
-            <div id="phoneOTPForm" style="display:none">
-              <input type="text" id="otpInput" placeholder="Enter 6-digit OTP" maxlength="6" style="width:100%;padding:10px;border:1px solid #4a5f7f;border-radius:8px;background:#0d1117;color:#c8d8f0;margin-bottom:10px;font-size:13px">
-              <button onclick="verifyPhoneOTP()" class="btn-primary" style="width:100%">Verify OTP</button>
-            </div>
-            <div id="phoneMsg" style="display:none;margin-top:10px;font-size:13px;line-height:1.6"></div>
-          </div>
-        </div>
-
         <div class="monet-section-title" style="margin-top:24px">✦ Verified Badge</div>
         <div style="background:rgba(77,240,192,0.04);border:1px solid rgba(77,240,192,0.15);border-radius:14px;padding:18px;margin-bottom:16px">
           <div id="verifiedStatus" style="font-size:13px;color:#8899b4;margin-bottom:12px">Loading...</div>
@@ -1856,73 +1807,38 @@ function switchAuthTab(tab){
 }
 
 async function signup(){
-  const btn = document.querySelector('.btn-primary');
   const name = byId('signupName').value.trim();
   const email = byId('signupEmail').value.trim().toLowerCase();
   const password = byId('signupPassword').value;
   const dob = byId('signupDob').value;
-  
-  // Validation
-  if(!name||!email||!password){ 
-    alert('❌ Please fill Name, Email, and Password'); 
-    btn.disabled = false;
-    btn.textContent = 'Create Account →';
-    return; 
-  }
-  
-  // DOB check - optional
-  let age = null;
-  if(dob){
-    const birthDate = new Date(dob);
-    const today = new Date();
-    age = today.getFullYear() - birthDate.getFullYear();
-    const m = today.getMonth() - birthDate.getMonth();
-    if(m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
-    if(age < 13){
-      alert('❌ You must be at least 13 years old.');
-      btn.disabled = false;
-      btn.textContent = 'Create Account →';
-      return;
-    }
+  if(!name||!email||!password){ alert('Please fill all required fields.'); return; }
+  if(!dob){ alert('Please enter your date of birth.'); return; }
+
+  // Age check — must be 13+
+  const birthDate = new Date(dob);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if(m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
+  if(age < 13){
+    alert('❌ You must be at least 13 years old to create a VibeNet account.');
+    return;
   }
 
   let profilePicUrl = '';
   const pic = byId('signupPic').files[0];
   if(pic){
-    try { 
-      btn.textContent = '📸 Uploading photo...';
-      const result = await uploadFile(pic, 'vibenet/avatars');
-      profilePicUrl = result.url || '';
-      btn.textContent = '⏳ Creating account...';
-    }
-    catch(e) { 
-      console.warn('Photo upload failed:', e);
-      btn.textContent = '⏳ Creating account...';
-    }
+    try { profilePicUrl = await uploadFile(pic, 'vibenet/avatars'); }
+    catch(e) { console.warn('Profile pic upload failed:', e); }
   }
 
-  try {
-    const res = await fetch(API + '/signup', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name, email, password, profile_pic: profilePicUrl })
-    });
-    const j = await res.json();
-    
-    if(j.user){ 
-      currentUser = j.user; 
-      onLogin(); 
-    } else { 
-      alert(j.error || 'Signup failed');
-      btn.disabled = false;
-      btn.textContent = 'Create Account →';
-    }
-  } catch(e) {
-    alert('⚠️ Network error: ' + e.message);
-    btn.disabled = false;
-    btn.textContent = 'Create Account →';
-  }
-}
+  const res = await fetch(API + '/signup', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, email, password, profile_pic: profilePicUrl })
+  });
+  const j = await res.json();
+  if(j.user){ currentUser = j.user; onLogin(); } else alert(j.error || j.message);
 }
 
 async function login(){
@@ -1977,7 +1893,7 @@ function showTab(tab){
   byId(tab).classList.add('visible');
   if(navMap[tab]) byId(navMap[tab]).classList.add('active');
 
-  if(tab === 'profile'){ loadProfilePosts(); loadVerifiedStatus(); loadEmailVerifyStatus(); loadPhoneVerifyStatus(); }
+  if(tab === 'profile'){ loadProfilePosts(); loadVerifiedStatus(); }
   if(tab === 'notifications') loadNotifications(true);
   if(tab === 'monet'){ loadMonetization(); loadAds();  }
 }
@@ -2006,21 +1922,37 @@ function showUploadProgress(show, label='Uploading...'){
 
 async function uploadFile(file, folder='vibenet/posts'){
   const isVideo = file.type.startsWith('video/');
-  const maxSize = isVideo ? 50 * 1024 * 1024 : 100 * 1024 * 1024; // 50MB video, 100MB image
+  let fileToUpload = file;
+  let thumbnailBlob = null;
   
-  // Check file size
-  if(file.size > maxSize){
-    const maxMB = isVideo ? 50 : 100;
-    alert(`${isVideo ? 'Video' : 'Image'} must be under ${maxMB}MB. Current size: ${(file.size/1024/1024).toFixed(1)}MB`);
-    return {url: '', thumbnail: ''};
+  // Compress video if larger than 10MB
+  if(isVideo && file.size > 10 * 1024 * 1024){
+    showUploadProgress(true, `Compressing video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+    try {
+      fileToUpload = await compressVideo(file);
+      showUploadProgress(true, `Extracting thumbnail...`);
+      thumbnailBlob = await extractVideoThumbnail(fileToUpload);
+      showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+    } catch(e) {
+      console.warn('Compression/thumbnail failed, uploading original:', e);
+      showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+    }
+  } else if(isVideo) {
+    showUploadProgress(true, `Extracting thumbnail...`);
+    try {
+      thumbnailBlob = await extractVideoThumbnail(file);
+    } catch(e) {
+      console.warn('Thumbnail extraction failed:', e);
+    }
+    showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+  } else {
+    showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
   }
-  
-  const isVideoFile = file.type.startsWith('video/');
-  showUploadProgress(true, `Uploading ${isVideoFile ? 'video' : 'image'} (${(file.size/1024/1024).toFixed(1)}MB)...`);
   
   try {
     const fd = new FormData();
-    fd.append('file', file);
+    fd.append('file', fileToUpload);
+    if(thumbnailBlob) fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
     const res = await fetch(API + '/upload', {method:'POST', body: fd});
     const j = await res.json();
     showUploadProgress(false);
@@ -2054,6 +1986,29 @@ async function extractVideoThumbnail(file){
     video.onerror = () => resolve(null);
     video.src = URL.createObjectURL(file);
   });
+}
+
+async function compressVideo(file){
+  const { FFmpeg, toBlobURL } = FFmpeg;
+  const ffmpeg = new FFmpeg.FFmpeg();
+  const coreURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js`, 'text/javascript');
+  const wasmURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm`, 'application/wasm');
+  
+  await ffmpeg.load({ coreURL, wasmURL });
+  
+  const inputName = 'input.' + file.name.split('.').pop();
+  const outputName = 'output.mp4';
+  
+  const buffer = await file.arrayBuffer();
+  ffmpeg.FS('writeFile', inputName, new Uint8Array(buffer));
+  
+  await ffmpeg.run('-i', inputName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-vf', 'scale=1280:-1', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName);
+  
+  const data = ffmpeg.FS('readFile', outputName);
+  ffmpeg.FS('unlink', inputName);
+  ffmpeg.FS('unlink', outputName);
+  
+  return new File([data.buffer], file.name.replace(/\.[^/.]+$/, '.mp4'), { type: 'video/mp4' });
 }
 
 function optimizeCldUrl(url, isVideo){
@@ -2181,21 +2136,36 @@ function createPostElement(p){
     if(isVideo){
       const wrap = document.createElement('div'); wrap.className='video-wrap';
       const v = document.createElement('video');
-      v.src = optimizeCldUrl(p.file_url, true);
+      v.dataset.src = optimizeCldUrl(p.file_url, true);
       v.controls = true; v.muted = true; v.loop = false;
       v.setAttribute('playsinline','');
       v.setAttribute('preload', 'metadata');
       v.style.background = '#0d1117';
       if(p.thumbnail_url) v.poster = p.thumbnail_url;
 
-      // Auto-pause when scrolled out of view
+      // Lazy load: set src when near viewport
       const vObs = new IntersectionObserver(entries => {
         entries.forEach(e => {
-          if(!e.isIntersecting && !v.paused){
-            v.pause();
+          if(e.isIntersecting && v.dataset.src){
+            v.src = v.dataset.src;
+            delete v.dataset.src;
+            vObs.disconnect();
+            // Thumbnail after src loads
+            v.addEventListener('loadedmetadata', ()=>{ v.currentTime = 0.05; });
+            v.addEventListener('seeked', ()=>{
+              if(v.dataset.thumbDone) return;
+              v.dataset.thumbDone = '1';
+              try {
+                const canvas = document.createElement('canvas');
+                canvas.width = v.videoWidth || 640;
+                canvas.height = v.videoHeight || 360;
+                canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+                v.poster = canvas.toDataURL('image/jpeg', 0.7);
+              } catch(e){}
+            }, { once: true });
           }
         });
-      }, { threshold: 0.5 });
+      }, { rootMargin: '300px' });
       vObs.observe(v);
 
       const hint = document.createElement('div'); hint.className='play-hint';
@@ -2442,102 +2412,7 @@ async function updateBio(){
   setTimeout(()=>saved.remove(), 2000);
 }
 
-async function sendEmailVerification(){
-  if(!currentUser) return;
-  const res = await fetch(API+'/send-verification-email', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({})
-  });
-  const j = await res.json();
-  
-  if(j.error){ alert('Error: '+j.error); return; }
-  
-  const msg = byId('emailMsg');
-  msg.style.display = 'block';
-  msg.style.color = '#4DF0C0';
-  msg.textContent = '✓ Verification email sent to '+currentUser.email+'. Check your inbox!';
-}
-
-async function loadEmailVerifyStatus(){
-  if(!currentUser) return;
-  const form = byId('emailVerifyForm');
-  const status = byId('emailVerifyStatus');
-  
-  if(currentUser.email_verified){
-    status.textContent = '✓ Your email is verified!';
-    status.style.color = '#4DF0C0';
-    form.style.display = 'none';
-  } else {
-    status.textContent = '⊗ Email not verified yet';
-    status.style.color = '#8899b4';
-    form.style.display = 'block';
-  }
-}
-
-async function sendPhoneOTP(){
-  if(!currentUser) return;
-  const phone = byId('phoneInput').value.trim();
-  if(!phone){ alert('Enter your phone number'); return; }
-  
-  const res = await fetch(API+'/send-phone-otp', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({phone})
-  });
-  const j = await res.json();
-  
-  if(j.error){ alert('Error: '+j.error); return; }
-  
-  byId('phoneOTPForm').style.display = 'block';
-  const msg = byId('phoneMsg');
-  msg.style.display = 'block';
-  msg.style.color = '#4DF0C0';
-  msg.textContent = '✓ OTP sent to '+phone;
-}
-
-async function verifyPhoneOTP(){
-  if(!currentUser) return;
-  const phone = byId('phoneInput').value.trim();
-  const otp = byId('otpInput').value.trim();
-  
-  if(!otp || otp.length !== 6){ alert('Enter 6-digit OTP'); return; }
-  
-  const res = await fetch(API+'/verify-phone-otp', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({phone, otp})
-  });
-  const j = await res.json();
-  
-  if(j.error){ alert('Invalid OTP'); return; }
-  
-  currentUser.phone_verified = true;
-  const msg = byId('phoneMsg');
-  msg.style.color = '#4DF0C0';
-  msg.textContent = '✓ Phone verified! You are now verified on VibeNet.';
-  byId('phoneVerifyForm').style.display = 'none';
-  
-  setTimeout(()=>{ location.reload(); }, 2000);
-}
-
-async function loadPhoneVerifyStatus(){
-  if(!currentUser) return;
-  const form = byId('phoneVerifyForm');
-  const status = byId('phoneVerifyStatus');
-  
-  if(currentUser.phone_verified){
-    status.textContent = '✓ Your phone is verified!';
-    status.style.color = '#4DF0C0';
-    form.style.display = 'none';
-  } else {
-    status.textContent = '⊗ Phone not verified yet';
-    status.style.color = '#8899b4';
-    form.style.display = 'block';
-  }
-}
-
-
+async function loadMonetization(){
   if(!currentUser) return;
   const r = await fetch(API+'/monetization/'+encodeURIComponent(currentUser.email));
   const j = await r.json();
@@ -2835,13 +2710,7 @@ def api_signup():
         return jsonify({"error": "email + password required"}), 400
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "User already exists"}), 400
-    
-    # Handle profile_pic as string or dict
     profile_pic = data.get("profile_pic", "")
-    if isinstance(profile_pic, dict):
-        profile_pic = profile_pic.get("url", "")
-    profile_pic = str(profile_pic).strip() if profile_pic else ""
-    
     user = User(name=name, email=email, password=password, profile_pic=profile_pic)
     db.session.add(user)
     db.session.commit()
@@ -2867,78 +2736,6 @@ def api_logout():
     return jsonify({"status": "logged out"})
 
 
-@app.route("/api/send-verification-email", methods=["POST"])
-def send_verification_email():
-    """Send verification email to user"""
-    email = session.get("user_email")
-    if not email:
-        return jsonify({"error": "Not logged in"}), 401
-    
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    if user.email_verified:
-        return jsonify({"error": "Email already verified"}), 400
-    
-    # Rate limiting: max 5 verification emails per day
-    recent_tokens = EmailVerificationToken.query.filter_by(email=email).all()
-    if len(recent_tokens) >= 5:
-        return jsonify({"error": "Too many verification requests. Try again later."}), 429
-    
-    # Generate secure token (expires in 24 hours)
-    token = uuid.uuid4().hex
-    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Delete old tokens
-    EmailVerificationToken.query.filter_by(email=email).delete()
-    evt = EmailVerificationToken(email=email, token=token, expires_at=expires_at)
-    db.session.add(evt)
-    db.session.commit()
-    
-    verification_url = f"https://vibe-net-revm.onrender.com/verify-email?token={token}&email={email}"
-    
-    # TODO: Send via email service (SendGrid, AWS SES, etc)
-    print(f"[EMAIL] Verification link: {verification_url}")
-    
-    return jsonify({"success": True, "message": "Verification email sent"})
-
-
-@app.route("/api/verify-email", methods=["POST"])
-def verify_email():
-    """Verify email token"""
-    data = request.get_json() or {}
-    token = data.get("token", "").strip()
-    email = data.get("email", "").strip().lower()
-    
-    if not token or not email:
-        return jsonify({"error": "Token and email required"}), 400
-    
-    # Find and validate token
-    evt = EmailVerificationToken.query.filter_by(token=token, email=email).first()
-    if not evt:
-        return jsonify({"error": "Invalid token"}), 400
-    
-    # Check expiration
-    if evt.expires_at:
-        expires = datetime.datetime.strptime(evt.expires_at, "%Y-%m-%d %H:%M:%S")
-        if datetime.datetime.utcnow() > expires:
-            db.session.delete(evt)
-            db.session.commit()
-            return jsonify({"error": "Token expired"}), 400
-    
-    # Mark email as verified
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    user.email_verified = 1
-    db.session.delete(evt)
-    db.session.commit()
-    
-    return jsonify({"success": True, "message": "Email verified!", "user": user.to_dict()})
-
-
 @app.route("/api/me")
 def api_me():
     email = session.get("user_email")
@@ -2946,33 +2743,6 @@ def api_me():
         return jsonify({"user": None})
     user = User.query.filter_by(email=email).first()
     return jsonify({"user": user.to_dict() if user else None})
-    evt = EmailVerificationToken.query.filter_by(token=token, email=email).first()
-    if not evt:
-        print(f"[SECURITY] Invalid token attempt for {email}")
-        return jsonify({"error": "Invalid or expired token"}), 400
-    
-    # Check expiration
-    if evt.expires_at:
-        expires = datetime.datetime.strptime(evt.expires_at, "%Y-%m-%d %H:%M:%S")
-        if datetime.datetime.utcnow() > expires:
-            db.session.delete(evt)
-            db.session.commit()
-            print(f"[SECURITY] Expired token used for {email}")
-            return jsonify({"error": "Token has expired. Request a new one."}), 400
-    
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    # Mark as verified
-    user.email_verified = 1
-    db.session.delete(evt)
-    db.session.commit()
-    
-    print(f"[SECURITY] Email verified for {email}")
-    
-    return jsonify({"success": True, "message": "Email verified!", "user": user.to_dict()})
-
 
 
 # ---------- Upload ----------
@@ -2985,13 +2755,9 @@ def api_upload():
         if not f.filename:
             return jsonify({"error": "No filename"}), 400
         data = f.read()
+        if len(data) > 100 * 1024 * 1024:
+            return jsonify({"error": "File too large (max 100MB)"}), 400
         mime = f.mimetype or "application/octet-stream"
-        is_video = mime.startswith('video/')
-        max_size = 50 * 1024 * 1024 if is_video else 100 * 1024 * 1024  # 50MB video, 100MB image
-        
-        if len(data) > max_size:
-            max_mb = 50 if is_video else 100
-            return jsonify({"error": f"File too large (max {max_mb}MB)"}), 400
         
         # Optional thumbnail
         thumbnail_data = None
@@ -3014,7 +2780,7 @@ def api_upload():
                 }
                 url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
                 
-                response = requests.post(url, data=data, headers=headers, timeout=600)
+                response = requests.post(url, data=data, headers=headers, timeout=300)
                 
                 if response.status_code in (200, 201):
                     # Return public URL
@@ -3105,36 +2871,18 @@ def api_posts():
         })
 
     data = request.get_json() or {}
-    author_email = data.get("author_email", "").strip().lower()
-    
-    if not author_email:
-        return jsonify({"error": "author_email required"}), 400
-    
-    user = User.query.filter_by(email=author_email).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    if user.banned:
-        return jsonify({"error": "Account banned"}), 403
-    
-    text = data.get("text", "").strip()
-    file_url = data.get("file_url", "").strip()
-    
-    if not text and not file_url:
-        return jsonify({"error": "Post must have text or file"}), 400
-    
     post = Post(
-        author_email=author_email,
-        author_name=data.get("author_name", user.name),
-        profile_pic=data.get("profile_pic", user.profile_pic),
-        text=text,
-        file_url=file_url,
+        author_email=data.get("author_email"),
+        author_name=data.get("author_name"),
+        profile_pic=data.get("profile_pic", ""),
+        text=data.get("text", ""),
+        file_url=data.get("file_url", ""),
         file_mime=data.get("file_mime", ""),
         thumbnail_url=data.get("thumbnail_url", ""),
     )
     db.session.add(post)
     db.session.commit()
-    return jsonify(post.to_dict()), 201
+    return jsonify(post.to_dict())
 
 
 @app.route("/api/posts/<int:post_id>", methods=["DELETE", "PATCH"])
@@ -3827,22 +3575,16 @@ def api_admin_approve_verified(vreq_id):
     db.session.commit()
     return redirect("/admin") if request.form else jsonify({"success":True})
 
+@app.route("/api/admin/wipe-posts", methods=["POST"])
+def api_admin_wipe_posts():
+    if not require_admin(): return jsonify({"error":"Unauthorized"}), 403
+    data = request.get_json() or {}
+    if data.get("confirm") != "WIPE": return jsonify({"error":"Send confirm=WIPE"}), 400
+    UserReaction.query.delete()
+    Post.query.delete()
+    db.session.commit()
+    return jsonify({"success":True})
+
 # ══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    try:
-        print(f"Starting VibeNet on {app.config['PORT']}")
-        print(f"Database: {app.config['SQLALCHEMY_DATABASE_URI'][:50]}...")
-        print(f"Supabase: {'OK' if _supabase_ok() else 'Not configured'}")
-        
-        # Test database connection
-        with app.app_context():
-            db.create_all()
-            print("✓ Database tables created/verified")
-        
-        print("✓ All checks passed, starting Flask")
-        app.run(host="0.0.0.0", port=app.config["PORT"], debug=False)
-    except Exception as e:
-        print(f"✗ Startup failed: {e}")
-        import traceback
-        traceback.print_exc()
-        exit(1)
+    app.run(host="0.0.0.0", port=app.config["PORT"], debug=True)
