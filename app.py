@@ -3038,100 +3038,87 @@ def api_upload():
         mime = f.mimetype or "application/octet-stream"
         
         print(f"📥 Upload starting: {f.filename} ({len(data)} bytes, mime: {mime})")
-        print(f"🪣 Bucket: {SUPABASE_BUCKET}")
-        print(f"🔑 Supabase OK: {_supabase_ok()}")
         
         # Optional thumbnail
-        thumbnail_data = None
         thumbnail_url = ""
         if "thumbnail" in request.files:
             thumb = request.files["thumbnail"]
             thumbnail_data = thumb.read()
             print(f"🖼️ Thumbnail provided: {len(thumbnail_data)} bytes")
-
-        # Try Supabase Storage first (preferred)
-        if _supabase_ok():
+            
             try:
-                file_id = uuid.uuid4().hex
-                file_ext = os.path.splitext(f.filename)[1] or ".bin"
-                file_path = f"posts/{file_id}{file_ext}"
+                thumb_id = uuid.uuid4().hex
+                thumb_path = f"posts/{thumb_id}.jpg"
                 
-                # Upload main file to Supabase Storage
+                # Upload thumbnail to Supabase
                 headers = {
                     "Authorization": f"Bearer {SUPABASE_KEY}",
-                    "Content-Type": mime,
+                    "Content-Type": "image/jpeg",
                 }
-                url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
+                thumb_url_endpoint = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{thumb_path}"
+                print(f"📸 Uploading thumbnail to: {thumb_url_endpoint}")
                 
-                print(f"📤 Upload URL: {url}")
-                print(f"📤 Headers: Authorization=Bearer ***, Content-Type={mime}")
+                thumb_resp = requests.post(
+                    thumb_url_endpoint,
+                    data=thumbnail_data,
+                    headers=headers,
+                    timeout=60
+                )
                 
-                response = requests.post(url, data=data, headers=headers, timeout=300)
+                print(f"📸 Thumbnail response: {thumb_resp.status_code} - {thumb_resp.text[:100]}")
                 
-                print(f"📡 Response status: {response.status_code}")
-                print(f"📡 Response text: {response.text[:200]}")
-                print(f"📡 Response headers: {dict(response.headers)}")
-                
-                if response.status_code in (200, 201):
-                    # Return public URL
-                    public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
-                    print(f"✅ Upload success! URL: {public_url}")
-                    
-                    # Upload thumbnail if provided
-                    if thumbnail_data:
-                        try:
-                            thumb_id = uuid.uuid4().hex
-                            thumb_path = f"posts/{thumb_id}_thumb.jpg"
-                            thumb_headers = {
-                                "Authorization": f"Bearer {SUPABASE_KEY}",
-                                "Content-Type": "image/jpeg",
-                            }
-                            thumb_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{thumb_path}"
-                            print(f"📸 Thumbnail URL: {thumb_url}")
-                            thumb_resp = requests.post(thumb_url, data=thumbnail_data, headers=thumb_headers, timeout=60)
-                            print(f"📸 Thumbnail response: {thumb_resp.status_code}")
-                            if thumb_resp.status_code in (200, 201):
-                                thumbnail_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{thumb_path}"
-                                print(f"✅ Thumbnail success!")
-                        except Exception as e:
-                            print(f"❌ Thumbnail upload failed: {e}")
-                    
-                    return jsonify({"url": public_url, "thumbnail": thumbnail_url})
-                else:
-                    print(f"❌ Supabase upload failed: {response.status_code} - {response.text}")
-                    # Fall back to DB for small files only
-                    if len(data) > 10 * 1024 * 1024:
-                        return jsonify({"error": f"Upload failed: {response.text[:80]}"}), 503
-                    print("Falling back to DB storage")
+                if thumb_resp.status_code in (200, 201):
+                    thumbnail_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{thumb_path}"
+                    print(f"✅ Thumbnail uploaded: {thumbnail_url}")
             except Exception as e:
-                print(f"❌ Supabase upload error: {e}")
+                print(f"❌ Thumbnail upload failed: {e}")
                 import traceback
-                print(traceback.format_exc())
-                if len(data) > 10 * 1024 * 1024:
-                    return jsonify({"error": f"Supabase upload failed: {str(e)[:80]}"}), 503
+                traceback.print_exc()
 
-        # Fallback: store as base64 in DB (only for small files)
-        if len(data) <= 10 * 1024 * 1024:
-            try:
-                import base64
-                b64      = base64.b64encode(data).decode("utf-8")
-                media_id = uuid.uuid4().hex
-                mf = MediaFile(id=media_id, mime=mime, data=b64)
-                db.session.add(mf)
-                db.session.commit()
-                print(f"✅ DB fallback success: /media/{media_id}")
-                return jsonify({"url": f"/media/{media_id}", "thumbnail": thumbnail_url})
-            except Exception as db_err:
-                print(f"❌ DB fallback failed: {db_err}")
-                db.session.rollback()
-                return jsonify({"error": f"Upload service temporarily unavailable. ({str(db_err)[:80]}...)"}), 503
-        else:
-            return jsonify({"error": "File too large and Supabase not available. Configure Supabase or use smaller files."}), 503
+        # Upload main video/file to Supabase
+        try:
+            file_id = uuid.uuid4().hex
+            file_ext = os.path.splitext(f.filename)[1] or ".bin"
+            file_path = f"posts/{file_id}{file_ext}"
+            
+            headers = {
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": mime,
+            }
+            upload_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
+            
+            print(f"📤 Uploading video to: {upload_url}")
+            print(f"📤 File size: {len(data)} bytes")
+            print(f"📤 Content-Type: {mime}")
+            
+            response = requests.post(
+                upload_url,
+                data=data,
+                headers=headers,
+                timeout=300
+            )
+            
+            print(f"📡 Upload response status: {response.status_code}")
+            print(f"📡 Upload response text: {response.text[:200]}")
+            
+            if response.status_code in (200, 201):
+                public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
+                print(f"✅ Video uploaded successfully!")
+                print(f"✅ Video URL: {public_url}")
+                return jsonify({"url": public_url, "thumbnail": thumbnail_url})
+            else:
+                print(f"❌ Supabase upload failed: {response.status_code}")
+                print(f"❌ Response: {response.text}")
+                return jsonify({"error": f"Supabase error {response.status_code}: {response.text[:100]}"}), 503
+                
+        except Exception as e:
+            print(f"❌ Upload exception: {e}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({"error": f"Upload failed: {str(e)[:100]}"}), 500
 
     except Exception as e:
-        print(f"❌ Upload error: {e}")
-        import traceback
-        print(traceback.format_exc())
+        print(f"❌ Outer error: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)[:150]}), 500
