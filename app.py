@@ -113,6 +113,7 @@ class Post(db.Model):
     text           = db.Column(db.Text, default="")
     file_url       = db.Column(db.Text, default="")
     file_mime      = db.Column(db.Text, default="")
+    thumbnail_url  = db.Column(db.Text, default="")
     timestamp      = db.Column(db.Text, default=lambda: now_ts())
     reactions_json = db.Column(db.Text, default='{"👍":0,"❤️":0,"😂":0}')
     comments_count = db.Column(db.Integer, default=0)
@@ -128,8 +129,8 @@ class Post(db.Model):
             "id": self.id, "author_email": self.author_email,
             "author_name": self.author_name, "profile_pic": self.profile_pic,
             "text": self.text, "file_url": self.file_url, "file_mime": self.file_mime or "",
-            "timestamp": self.timestamp, "reactions": self.reactions(),
-            "comments_count": self.comments_count,
+            "thumbnail_url": self.thumbnail_url or "", "timestamp": self.timestamp,
+            "reactions": self.reactions(), "comments_count": self.comments_count,
             "user_reaction": user_reaction, "author_verified": author_verified,
         }
 
@@ -279,6 +280,7 @@ with app.app_context():
         "ALTER TABLE payout_requests ADD COLUMN created_at TEXT DEFAULT ''",
         "ALTER TABLE posts ADD COLUMN file_mime TEXT DEFAULT ''",
         "ALTER TABLE posts ADD COLUMN comments_count INTEGER DEFAULT 0",
+        "ALTER TABLE posts ADD COLUMN thumbnail_url TEXT DEFAULT ''",
     ]
     for sql in migrations:
         try:
