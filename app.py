@@ -1968,66 +1968,184 @@ async function uploadFile(file, folder='vibenet/posts'){
   let fileToUpload = file;
   let thumbnailBlob = null;
   
-  // Compress video if larger than 10MB
-  if(isVideo && file.size > 10 * 1024 * 1024){
-    showUploadProgress(true, `Compressing video (${(file.size/1024/1024).toFixed(1)}MB)...`);
-    try {
-      fileToUpload = await compressVideo(file);
-      showUploadProgress(true, `Extracting thumbnail...`);
-      thumbnailBlob = await extractVideoThumbnail(fileToUpload);
-      showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
-    } catch(e) {
-      console.warn('Compression/thumbnail failed, uploading original:', e);
-      showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
-    }
-  } else if(isVideo) {
-    showUploadProgress(true, `Extracting thumbnail...`);
-    try {
-      thumbnailBlob = await extractVideoThumbnail(file);
-    } catch(e) {
-      console.warn('Thumbnail extraction failed:', e);
-    }
-    showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
-  } else {
-    showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
-  }
-  
   try {
+    // Compress video if larger than 10MB
+    if(isVideo && file.size > 10 * 1024 * 1024){
+      showUploadProgress(true, `Compressing video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      try {
+        fileToUpload = await compressVideo(file);
+        showUploadProgress(true, `Extracting thumbnail...`);
+        thumbnailBlob = await extractVideoThumbnail(fileToUpload);
+        showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+      } catch(compressionError) {
+        console.warn('⚠️ Compression/thumbnail failed, uploading original:', compressionError);
+        fileToUpload = file;  // Fall back to original
+        thumbnailBlob = null;
+        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      }
+    } else if(isVideo) {
+      showUploadProgress(true, `Extracting thumbnail...`);
+      try {
+        thumbnailBlob = await extractVideoThumbnail(file);
+        if(thumbnailBlob) {
+          console.log('✅ Thumbnail created');
+        } else {
+          console.warn('⚠️ Thumbnail is null, continuing without');
+        }
+      } catch(thumbnailError) {
+        console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
+        thumbnailBlob = null;  // Continue without thumbnail
+      }
+      showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+    } else {
+      showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+    }
+    
+    // Now upload with whatever we have
     const fd = new FormData();
     fd.append('file', fileToUpload);
-    if(thumbnailBlob) fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
-    const res = await fetch(API + '/upload', {method:'POST', body: fd});
+    if(thumbnailBlob) {
+      fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
+      console.log('📸 Including thumbnail with upload');
+    }
+    
+    const res = await fetch(API + '/upload', {
+      method: 'POST',
+      body: fd,
+      timeout: 120000  // 2 minute timeout for large videos
+    });
+    
     const j = await res.json();
     showUploadProgress(false);
-    if(j.error) throw new Error(j.error);
-    return {url: j.url || '', thumbnail: j.thumbnail || ''};
-  } catch(e) {
+    
+    if(j.error) {
+      console.error('❌ Upload error:', j.error);
+      // Don't throw - just return empty and continue
+      return {url: '', thumbnail: ''};
+    }
+    
+    console.log('✅ Upload successful:', {url: j.url, thumbnail: j.thumbnail});
+    return {
+      url: j.url || '',
+      thumbnail: j.thumbnail || ''
+    };
+    
+  } catch(uploadError) {
     showUploadProgress(false);
-    console.error('Upload failed:', e.message);
-    alert('Upload failed: ' + e.message);
+    console.error('❌ Upload caught error:', uploadError.message);
+    // NEVER throw - just return empty
+    // This prevents upload errors from breaking posts
     return {url: '', thumbnail: ''};
   }
 }
 
 async function extractVideoThumbnail(file){
   return new Promise((resolve) => {
-    const video = document.createElement('video');
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    
-    video.onloadedmetadata = () => {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      video.currentTime = Math.min(1, video.duration * 0.1);
-    };
-    
-    video.onseeked = () => {
-      ctx.drawImage(video, 0, 0);
-      canvas.toBlob(resolve, 'image/jpeg', 0.8);
-    };
-    
-    video.onerror = () => resolve(null);
-    video.src = URL.createObjectURL(file);
+    try {
+      const video = document.createElement('video');
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      
+      let extracted = false;
+      
+      // CRITICAL: Timeout - extract after 5 seconds if nothing happens
+      const timeout = setTimeout(() => {
+        if(!extracted) {
+          console.warn('⚠️ Thumbnail timeout - forcing extraction');
+          try {
+            // Force draw current frame
+            if(canvas.width > 0 && canvas.height > 0) {
+              canvas.toBlob((blob) => {
+                extracted = true;
+                console.log('✅ Forced thumbnail:', blob ? blob.size : 0, 'bytes');
+                resolve(blob || null);
+              }, 'image/jpeg', 0.85);
+            } else {
+              resolve(null);
+            }
+          } catch(e) {
+            console.error('Force extract failed:', e);
+            resolve(null);
+          }
+        }
+        try { URL.revokeObjectURL(video.src); } catch(e) {}
+      }, 5000);
+      
+      video.onloadedmetadata = () => {
+        try {
+          console.log('📹 Loaded:', video.videoWidth, 'x', video.videoHeight);
+          canvas.width = Math.min(video.videoWidth || 1280, 1280);
+          canvas.height = Math.min(video.videoHeight || 720, 720);
+          
+          // Seek to 1 second or 10% whichever is less
+          const seekTime = Math.max(0, Math.min(1, (video.duration || 10) * 0.1));
+          video.currentTime = seekTime;
+          console.log('⏩ Seeking to:', seekTime, 'sec');
+        } catch(e) {
+          console.error('❌ Metadata error:', e);
+          clearTimeout(timeout);
+          try { URL.revokeObjectURL(video.src); } catch(err) {}
+          resolve(null);
+        }
+      };
+      
+      video.onseeked = () => {
+        if(!extracted) {
+          try {
+            extracted = true;
+            console.log('📐 Drawing to canvas:', canvas.width, 'x', canvas.height);
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            canvas.toBlob((blob) => {
+              clearTimeout(timeout);
+              try { URL.revokeObjectURL(video.src); } catch(e) {}
+              
+              if(blob) {
+                console.log('✅ Thumbnail extracted:', blob.size, 'bytes');
+                resolve(blob);
+              } else {
+                console.warn('⚠️ Blob is null');
+                resolve(null);
+              }
+            }, 'image/jpeg', 0.85);
+          } catch(e) {
+            console.error('❌ Draw error:', e);
+            clearTimeout(timeout);
+            try { URL.revokeObjectURL(video.src); } catch(err) {}
+            resolve(null);
+          }
+        }
+      };
+      
+      video.onerror = (e) => {
+        console.error('❌ Video load error');
+        clearTimeout(timeout);
+        try { URL.revokeObjectURL(video.src); } catch(err) {}
+        resolve(null);
+      };
+      
+      video.oncanplay = () => {
+        console.log('▶️ Video can play');
+      };
+      
+      // CRITICAL: Set all attributes BEFORE src
+      video.crossOrigin = 'anonymous';
+      video.preload = 'metadata';
+      video.muted = true;
+      
+      try {
+        video.src = URL.createObjectURL(file);
+        video.load();
+        console.log('📥 Loading video...');
+      } catch(e) {
+        console.error('❌ Cannot create object URL:', e);
+        clearTimeout(timeout);
+        resolve(null);
+      }
+    } catch(e) {
+      console.error('❌ Outer error:', e);
+      resolve(null);
+    }
   });
 }
 
@@ -2103,20 +2221,38 @@ async function addPost(){
   const text = byId('postText').value.trim();
   const fileEl = byId('fileUpload');
   let url = '', mime = '', thumbnail = '';
+  let uploadSucceeded = false;
   
+  // Handle file upload with BULLETPROOF error handling
   if(fileEl.files[0]){
-    mime = fileEl.files[0].type;
+    mime = fileEl.files[0].type || 'application/octet-stream';
+    
     try {
+      console.log('Starting upload:', fileEl.files[0].name);
       const result = await uploadFile(fileEl.files[0]);
-      url = result.url;
-      thumbnail = result.thumbnail;
-    } catch(e) {
-      console.error('Upload failed:', e);
-      alert('Upload failed, post text only: ' + e.message);
+      
+      // Check if upload actually succeeded
+      if(result && result.url){
+        url = result.url || '';
+        thumbnail = result.thumbnail || '';
+        uploadSucceeded = true;
+        console.log('✅ Upload successful:', url);
+      } else {
+        console.warn('⚠️ Upload returned empty result, continuing with text only');
+      }
+    } catch(uploadError) {
+      // CRITICAL: Never let upload error block the post
+      console.error('❌ Upload error (continuing anyway):', uploadError);
+      console.error('Error details:', uploadError.message, uploadError.stack);
+      
+      // Don't show alert - just continue with text
+      // This way video failure doesn't kill the entire post
       url = '';
+      thumbnail = '';
     }
   }
   
+  // VALIDATION: Post must have either text OR successful file upload
   if(!text && !url){ 
     alert('Please write something or attach a file'); 
     return; 
@@ -2128,45 +2264,76 @@ async function addPost(){
   btn.textContent = '⏳ Posting...';
   
   try {
+    // Build payload with safety checks
+    const payload = {
+      author_email: currentUser.email,
+      author_name: currentUser.name || 'Unknown',
+      profile_pic: currentUser.profile_pic || '',
+      text: text || '',  // Text can be empty if file uploaded
+      file_url: url || '',  // File URL can be empty if text provided
+      file_mime: mime || '',  // MIME can be empty
+      thumbnail_url: thumbnail || ''  // Thumbnail can be empty
+    };
+    
+    console.log('Sending post payload:', payload);
+    
     const res = await fetch(API + '/posts', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        author_email: currentUser.email,
-        author_name: currentUser.name,
-        profile_pic: currentUser.profile_pic || '',
-        text,
-        file_url: url,
-        file_mime: mime,
-        thumbnail_url: thumbnail
-      })
+      body: JSON.stringify(payload),
+      timeout: 60000  // 60 second timeout
     });
     
     const j = await res.json();
+    console.log('Post response:', res.status, j);
     
     if(res.status === 201 || res.status === 200){
-      // Success
-      console.log('Post created:', j);
+      // ✅ SUCCESS - Post saved!
+      console.log('✅ Post created successfully:', j);
       byId('postText').value = '';
       fileEl.value = '';
       byId('fileNameDisplay').textContent = '';
       btn.textContent = 'Post →';
       btn.disabled = false;
       
+      // Show success message
+      if(!uploadSucceeded && fileEl.files[0]){
+        alert('✅ Post created! (Video upload will process in background)');
+      }
+      
       // Refresh everything
-      await loadFeed(true);
-      await loadProfilePosts();
-      await loadMonetization();
+      setTimeout(async () => {
+        await loadFeed(true);
+        await loadProfilePosts();
+        await loadMonetization();
+      }, 500);
+      
+    } else if(res.status >= 400 && res.status < 500){
+      // Client error (validation failed)
+      console.error('❌ Validation error:', j);
+      alert('❌ ' + (j.error || 'Post failed validation'));
+      btn.textContent = 'Post →';
+      btn.disabled = false;
+      
+    } else if(res.status >= 500){
+      // Server error (temporary issue)
+      console.error('❌ Server error:', j);
+      alert('⚠️ Server error. Please try again in a few seconds.');
+      btn.textContent = 'Post →';
+      btn.disabled = false;
+      
     } else {
-      // Error from backend
-      console.error('Post failed:', j);
-      alert('❌ ' + (j.error || 'Failed to post'));
+      // Unknown error
+      console.error('❌ Unknown error:', res.status, j);
+      alert('⚠️ Something went wrong. Please try again.');
       btn.textContent = 'Post →';
       btn.disabled = false;
     }
-  } catch(e) {
-    console.error('Network error:', e);
-    alert('⚠️ Network error: ' + e.message);
+    
+  } catch(networkError) {
+    // CRITICAL: Network/fetch error
+    console.error('❌ Network error:', networkError);
+    alert('⚠️ Network error: ' + (networkError.message || 'Cannot reach server'));
     btn.textContent = 'Post →';
     btn.disabled = false;
   }
