@@ -2911,63 +2911,6 @@ def api_me():
         return jsonify({"user": None})
     user = User.query.filter_by(email=email).first()
     return jsonify({"user": user.to_dict() if user else None})
-
-
-
-@app.route("/api/send-verification-email", methods=["POST"])
-def send_verification_email():
-    """Send verification email to user with security checks"""
-    email = session.get("user_email")
-    if not email:
-        return jsonify({"error": "Not logged in"}), 401
-    
-    user = User.query.filter_by(email=email).first()
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-    
-    if user.email_verified:
-        return jsonify({"error": "Email already verified"}), 400
-    
-    # Rate limiting: max 5 verification emails per email per day
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-    recent_tokens = EmailVerificationToken.query.filter_by(email=email).all()
-    if len(recent_tokens) >= 5:
-        return jsonify({"error": "Too many verification requests. Try again later."}), 429
-    
-    # Generate secure token
-    token = uuid.uuid4().hex
-    expires_at = (datetime.datetime.utcnow() + datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Delete old tokens for this email
-    EmailVerificationToken.query.filter_by(email=email).delete()
-    evt = EmailVerificationToken(email=email, token=token, created_at=now_ts())
-    evt.expires_at = expires_at
-    db.session.add(evt)
-    db.session.commit()
-    
-    # Build verification link
-    verification_url = f"https://vibe-net-revm.onrender.com/verify-email?token={token}&email={email}"
-    
-    # TODO: Send email via SMTP (SendGrid, AWS SES, etc)
-    # For now, log it for testing
-    print(f"[SECURITY] Verification email sent to {email}")
-    print(f"Verification link: {verification_url}")
-    print(f"Token expires at: {expires_at}")
-    
-    return jsonify({"success": True, "message": "Verification email sent to "+email})
-
-
-@app.route("/api/verify-email", methods=["POST"])
-def verify_email():
-    """Verify email token with security checks"""
-    data = request.get_json() or {}
-    token = data.get("token", "").strip()
-    email = data.get("email", "").strip().lower()
-    
-    if not token or not email:
-        return jsonify({"error": "Token and email required"}), 400
-    
-    # Find token
     evt = EmailVerificationToken.query.filter_by(token=token, email=email).first()
     if not evt:
         print(f"[SECURITY] Invalid token attempt for {email}")
@@ -3848,16 +3791,6 @@ def api_admin_approve_verified(vreq_id):
             db.session.add(Notification(user_email=vr.user_email, text="✦ Your verified badge has been approved! You are now VibeNet Verified."))
     db.session.commit()
     return redirect("/admin") if request.form else jsonify({"success":True})
-
-@app.route("/api/admin/wipe-posts", methods=["POST"])
-def api_admin_wipe_posts():
-    if not require_admin(): return jsonify({"error":"Unauthorized"}), 403
-    data = request.get_json() or {}
-    if data.get("confirm") != "WIPE": return jsonify({"error":"Send confirm=WIPE"}), 400
-    UserReaction.query.delete()
-    Post.query.delete()
-    db.session.commit()
-    return jsonify({"success":True})
 
 # ══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
