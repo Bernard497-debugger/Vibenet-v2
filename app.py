@@ -1573,6 +1573,9 @@ body::after {
       <button class="nav-tab" id="navProfile" onclick="showTab('profile')">
         <span>👤</span><span class="tab-label"> Profile</span>
       </button>
+      <button class="nav-tab" id="navLegal" onclick="showTab('legal')">
+        <span>⚖️</span><span class="tab-label"> Legal</span>
+      </button>
     </div>
 
     <div class="nav-right">
@@ -1734,6 +1737,44 @@ body::after {
           <div style="font-size:13px;color:#c8d8f0;margin-bottom:14px">Get the <strong style="color:#4DF0C0">✦ VibeNet Verified</strong> badge on your profile and posts. One-time fee of <strong>P50</strong> via Orange Money.</div>
           <button id="verifiedBtn" onclick="requestVerified()" class="btn-primary" style="width:100%">✦ Apply for Verified Badge — P50</button>
           <div id="verifiedMsg" style="display:none;margin-top:10px;font-size:13px;line-height:1.6"></div>
+        </div>
+      </div>
+
+      <!-- Legal Tab -->
+      <div id="legal" class="tab">
+        <div style="max-width:600px;margin:0 auto;padding:20px">
+          <h2 style="font-size:24px;font-weight:700;color:#e8f0ff;margin-bottom:20px">📋 Legal Information</h2>
+          
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:30px">
+            <a href="/privacy" target="_blank" style="display:flex;align-items:center;gap:12px;padding:16px;background:rgba(77,240,192,0.08);border-radius:12px;text-decoration:none;color:#4DF0C0;border:1px solid rgba(77,240,192,0.2);transition:all 0.2s">
+              <span style="font-size:24px">🔒</span>
+              <div>
+                <div style="font-weight:700;margin-bottom:4px">Privacy Policy</div>
+                <div style="font-size:12px;color:#8899b4">Data protection & POPIA</div>
+              </div>
+            </a>
+            
+            <a href="/terms" target="_blank" style="display:flex;align-items:center;gap:12px;padding:16px;background:rgba(77,240,192,0.08);border-radius:12px;text-decoration:none;color:#4DF0C0;border:1px solid rgba(77,240,192,0.2);transition:all 0.2s">
+              <span style="font-size:24px">⚖️</span>
+              <div>
+                <div style="font-weight:700;margin-bottom:4px">Terms & Conditions</div>
+                <div style="font-size:12px;color:#8899b4">Usage rights & rules</div>
+              </div>
+            </a>
+          </div>
+
+          <div style="padding:16px;background:rgba(255,255,255,0.04);border-radius:12px;border-left:3px solid #4DF0C0;margin-bottom:20px">
+            <div style="font-size:13px;color:#c8d8f0">
+              <strong>VibeNet</strong> is committed to protecting your privacy and ensuring you have a positive experience on our platform.
+            </div>
+            <div style="font-size:13px;color:#8899b4;margin-top:8px">
+              By using VibeNet, you agree to our Terms & Conditions and Privacy Policy.
+            </div>
+          </div>
+
+          <div style="font-size:12px;color:#5a6a85;text-align:center">
+            <strong>Questions?</strong> Contact: <a href="mailto:botsile55@gmail.com" style="color:#4DF0C0">botsile55@gmail.com</a>
+          </div>
         </div>
       </div>
 
