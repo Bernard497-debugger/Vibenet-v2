@@ -1554,7 +1554,7 @@ body::after {
           <div class="field-label">Profile photo (optional)</div>
           <input id="signupPic" type="file" accept="image/*" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--muted2);width:100%;font-size:13px;" />
         </div>
-        <button class="btn-primary" onclick="signup()" style="width:100%;margin-top:4px;">Create Account →</button>
+        <button class="btn-primary" onclick="this.disabled=true; this.textContent='⏳ Creating...'; signup();" style="width:100%;margin-top:4px;">Create Account →</button>
         <div style="text-align:center;margin-top:14px;font-size:12px;color:#5a6a85">Already have an account? <span onclick="switchAuthTab('login')" style="color:var(--accent);cursor:pointer;font-weight:600">Sign In</span></div>
       </div>
 
@@ -1856,34 +1856,48 @@ function switchAuthTab(tab){
 }
 
 async function signup(){
+  const btn = document.querySelector('.btn-primary');
   const name = byId('signupName').value.trim();
   const email = byId('signupEmail').value.trim().toLowerCase();
   const password = byId('signupPassword').value;
   const dob = byId('signupDob').value;
-  if(!name||!email||!password){ alert('Please fill all required fields.'); return; }
-  if(!dob){ alert('Please enter your date of birth.'); return; }
-
-  // Age check — must be 13+
-  const birthDate = new Date(dob);
-  const today = new Date();
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const m = today.getMonth() - birthDate.getMonth();
-  if(m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
-  if(age < 13){
-    alert('❌ You must be at least 13 years old to create a VibeNet account.');
-    return;
+  
+  // Validation
+  if(!name||!email||!password){ 
+    alert('❌ Please fill Name, Email, and Password'); 
+    btn.disabled = false;
+    btn.textContent = 'Create Account →';
+    return; 
+  }
+  
+  // DOB check - optional
+  let age = null;
+  if(dob){
+    const birthDate = new Date(dob);
+    const today = new Date();
+    age = today.getFullYear() - birthDate.getFullYear();
+    const m = today.getMonth() - birthDate.getMonth();
+    if(m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) age--;
+    if(age < 13){
+      alert('❌ You must be at least 13 years old.');
+      btn.disabled = false;
+      btn.textContent = 'Create Account →';
+      return;
+    }
   }
 
   let profilePicUrl = '';
   const pic = byId('signupPic').files[0];
   if(pic){
     try { 
+      btn.textContent = '📸 Uploading photo...';
       const result = await uploadFile(pic, 'vibenet/avatars');
       profilePicUrl = result.url || '';
+      btn.textContent = '⏳ Creating account...';
     }
     catch(e) { 
-      console.warn('Profile pic upload skipped:', e);
-      // Don't fail signup if pic upload fails
+      console.warn('Photo upload failed:', e);
+      btn.textContent = '⏳ Creating account...';
     }
   }
 
@@ -1894,15 +1908,19 @@ async function signup(){
       body: JSON.stringify({ name, email, password, profile_pic: profilePicUrl })
     });
     const j = await res.json();
+    
     if(j.user){ 
       currentUser = j.user; 
       onLogin(); 
     } else { 
-      alert(j.error || 'Signup failed. Please try again.');
+      alert(j.error || 'Signup failed');
+      btn.disabled = false;
+      btn.textContent = 'Create Account →';
     }
   } catch(e) {
-    console.error('Signup error:', e);
-    alert('Network error: ' + e.message);
+    alert('⚠️ Network error: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Create Account →';
   }
 }
 }
