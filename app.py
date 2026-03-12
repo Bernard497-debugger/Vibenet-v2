@@ -1491,6 +1491,7 @@ body::after {
 }
 </style>
 <script async src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.6/dist/ffmpeg.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0"></script>
 </head>
 <body>
 
@@ -1979,7 +1980,7 @@ async function uploadFile(file, folder='vibenet/posts'){
         showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
       } catch(compressionError) {
         console.warn('⚠️ Compression/thumbnail failed, uploading original:', compressionError);
-        fileToUpload = file;  // Fall back to original
+        fileToUpload = file;
         thumbnailBlob = null;
         showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
       }
@@ -1994,47 +1995,98 @@ async function uploadFile(file, folder='vibenet/posts'){
         }
       } catch(thumbnailError) {
         console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
-        thumbnailBlob = null;  // Continue without thumbnail
+        thumbnailBlob = null;
       }
       showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     } else {
       showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     }
     
-    // Now upload with whatever we have
-    const fd = new FormData();
-    fd.append('file', fileToUpload);
-    if(thumbnailBlob) {
-      fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
-      console.log('📸 Including thumbnail with upload');
-    }
-    
-    const res = await fetch(API + '/upload', {
-      method: 'POST',
-      body: fd,
-      timeout: 120000  // 2 minute timeout for large videos
-    });
-    
-    const j = await res.json();
-    showUploadProgress(false);
-    
-    if(j.error) {
-      console.error('❌ Upload error:', j.error);
-      // Don't throw - just return empty and continue
+    // Now upload using Supabase JS SDK (direct upload)
+    try {
+      // Initialize Supabase client
+      const supabaseUrl = 'https://gxbwyxoxmkfiodsvmmnb.supabase.co';
+      const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd4Ynd5eG94bWtmaW9kc3ZtbW5iIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDgyNDgzODUsImV4cCI6MjAyMzg0ODM4NX0.Oi-1uJzx8vN1DkfHwL7gH8OvPv5n5QqQ5QqQ5QqQ5QqQ';
+      
+      const { createClient } = window.supabase;
+      const sbClient = createClient(supabaseUrl, supabaseKey);
+      
+      // Generate unique filename
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).substring(7);
+      const ext = fileToUpload.name.split('.').pop() || 'bin';
+      const filename = `${timestamp}-${random}.${ext}`;
+      const filepath = `posts/${filename}`;
+      
+      console.log('📤 Uploading to Supabase:', filepath);
+      
+      // Upload file
+      const { data, error } = await sbClient.storage
+        .from('Vibenet')
+        .upload(filepath, fileToUpload, {
+          cacheControl: '3600',
+          upsert: false
+        });
+      
+      if(error) {
+        console.error('❌ Supabase upload error:', error);
+        throw new Error(error.message);
+      }
+      
+      console.log('✅ File uploaded:', data);
+      
+      // Get public URL
+      const { data: publicData } = sbClient.storage
+        .from('Vibenet')
+        .getPublicUrl(filepath);
+      
+      const publicUrl = publicData.publicUrl;
+      console.log('✅ Public URL:', publicUrl);
+      
+      // Upload thumbnail if available
+      let thumbnailUrl = '';
+      if(thumbnailBlob) {
+        try {
+          const thumbExt = 'jpg';
+          const thumbFilename = `${timestamp}-${random}-thumb.${thumbExt}`;
+          const thumbPath = `posts/${thumbFilename}`;
+          
+          const { data: thumbData, error: thumbError } = await sbClient.storage
+            .from('Vibenet')
+            .upload(thumbPath, thumbnailBlob, {
+              cacheControl: '3600',
+              upsert: false
+            });
+          
+          if(thumbError) {
+            console.warn('⚠️ Thumbnail upload failed:', thumbError);
+          } else {
+            const { data: thumbPublic } = sbClient.storage
+              .from('Vibenet')
+              .getPublicUrl(thumbPath);
+            thumbnailUrl = thumbPublic.publicUrl;
+            console.log('✅ Thumbnail URL:', thumbnailUrl);
+          }
+        } catch(e) {
+          console.warn('⚠️ Thumbnail upload exception:', e);
+        }
+      }
+      
+      showUploadProgress(false);
+      return {
+        url: publicUrl,
+        thumbnail: thumbnailUrl
+      };
+      
+    } catch(supabaseError) {
+      console.error('❌ Supabase error:', supabaseError.message);
+      showUploadProgress(false);
       return {url: '', thumbnail: ''};
     }
-    
-    console.log('✅ Upload successful:', {url: j.url, thumbnail: j.thumbnail});
-    return {
-      url: j.url || '',
-      thumbnail: j.thumbnail || ''
-    };
     
   } catch(uploadError) {
     showUploadProgress(false);
     console.error('❌ Upload caught error:', uploadError.message);
-    // NEVER throw - just return empty
-    // This prevents upload errors from breaking posts
     return {url: '', thumbnail: ''};
   }
 }
@@ -3024,12 +3076,17 @@ def api_upload():
             return jsonify({"error": "File too large (max 100MB)"}), 400
         mime = f.mimetype or "application/octet-stream"
         
+        print(f"📥 Upload starting: {f.filename} ({len(data)} bytes, mime: {mime})")
+        print(f"🪣 Bucket: {SUPABASE_BUCKET}")
+        print(f"🔑 Supabase OK: {_supabase_ok()}")
+        
         # Optional thumbnail
         thumbnail_data = None
         thumbnail_url = ""
         if "thumbnail" in request.files:
             thumb = request.files["thumbnail"]
             thumbnail_data = thumb.read()
+            print(f"🖼️ Thumbnail provided: {len(thumbnail_data)} bytes")
 
         # Try Supabase Storage first (preferred)
         if _supabase_ok():
@@ -3045,11 +3102,19 @@ def api_upload():
                 }
                 url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
                 
+                print(f"📤 Upload URL: {url}")
+                print(f"📤 Headers: Authorization=Bearer ***, Content-Type={mime}")
+                
                 response = requests.post(url, data=data, headers=headers, timeout=300)
+                
+                print(f"📡 Response status: {response.status_code}")
+                print(f"📡 Response text: {response.text[:200]}")
+                print(f"📡 Response headers: {dict(response.headers)}")
                 
                 if response.status_code in (200, 201):
                     # Return public URL
                     public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
+                    print(f"✅ Upload success! URL: {public_url}")
                     
                     # Upload thumbnail if provided
                     if thumbnail_data:
@@ -3061,21 +3126,26 @@ def api_upload():
                                 "Content-Type": "image/jpeg",
                             }
                             thumb_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{thumb_path}"
+                            print(f"📸 Thumbnail URL: {thumb_url}")
                             thumb_resp = requests.post(thumb_url, data=thumbnail_data, headers=thumb_headers, timeout=60)
+                            print(f"📸 Thumbnail response: {thumb_resp.status_code}")
                             if thumb_resp.status_code in (200, 201):
                                 thumbnail_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{thumb_path}"
+                                print(f"✅ Thumbnail success!")
                         except Exception as e:
-                            print(f"Thumbnail upload failed: {e}")
+                            print(f"❌ Thumbnail upload failed: {e}")
                     
                     return jsonify({"url": public_url, "thumbnail": thumbnail_url})
                 else:
-                    print(f"Supabase upload failed: {response.status_code} - {response.text}")
+                    print(f"❌ Supabase upload failed: {response.status_code} - {response.text}")
                     # Fall back to DB for small files only
                     if len(data) > 10 * 1024 * 1024:
                         return jsonify({"error": f"Upload failed: {response.text[:80]}"}), 503
                     print("Falling back to DB storage")
             except Exception as e:
-                print(f"Supabase upload error: {e}")
+                print(f"❌ Supabase upload error: {e}")
+                import traceback
+                print(traceback.format_exc())
                 if len(data) > 10 * 1024 * 1024:
                     return jsonify({"error": f"Supabase upload failed: {str(e)[:80]}"}), 503
 
@@ -3088,16 +3158,19 @@ def api_upload():
                 mf = MediaFile(id=media_id, mime=mime, data=b64)
                 db.session.add(mf)
                 db.session.commit()
+                print(f"✅ DB fallback success: /media/{media_id}")
                 return jsonify({"url": f"/media/{media_id}", "thumbnail": thumbnail_url})
             except Exception as db_err:
-                print(f"DB fallback failed: {db_err}")
+                print(f"❌ DB fallback failed: {db_err}")
                 db.session.rollback()
                 return jsonify({"error": f"Upload service temporarily unavailable. ({str(db_err)[:80]}...)"}), 503
         else:
             return jsonify({"error": "File too large and Supabase not available. Configure Supabase or use smaller files."}), 503
 
     except Exception as e:
-        print(f"Upload error: {e}")
+        print(f"❌ Upload error: {e}")
+        import traceback
+        print(traceback.format_exc())
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)[:150]}), 500
