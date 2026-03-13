@@ -273,6 +273,7 @@ with app.app_context():
         "ALTER TABLE ads ADD COLUMN approved INTEGER DEFAULT 0",
         "ALTER TABLE ads ADD COLUMN whatsapp_number TEXT DEFAULT ''",
         "ALTER TABLE ads ADD COLUMN expiry_date TEXT DEFAULT ''",
+        "ALTER TABLE ads ADD COLUMN image_url TEXT DEFAULT ''",
         "ALTER TABLE payout_requests ADD COLUMN user_email TEXT DEFAULT ''",
         "ALTER TABLE payout_requests ADD COLUMN user_name TEXT DEFAULT ''",
         "ALTER TABLE payout_requests ADD COLUMN om_number TEXT DEFAULT ''",
