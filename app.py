@@ -2760,44 +2760,59 @@ async function createAd(){
   
   let imageUrl = '';
   
-  // Upload image if provided
+  // Upload image if provided (simple image upload)
   if(fileEl && fileEl.files[0]){
     try {
-      showUploadProgress(true, 'Uploading ad image...');
-      const result = await uploadFile(fileEl.files[0]);
-      if(result.url){
-        imageUrl = result.url;
+      console.log('📸 Uploading ad image:', fileEl.files[0].name);
+      const fd = new FormData();
+      fd.append('file', fileEl.files[0]);
+      
+      const res = await fetch(API + '/upload', {
+        method: 'POST',
+        body: fd
+      });
+      
+      const j = await res.json();
+      if(j.url){
+        imageUrl = j.url;
         console.log('✅ Ad image uploaded:', imageUrl);
+      } else {
+        console.warn('⚠️ Image upload returned no URL, continuing without image');
       }
     } catch(e) {
       console.warn('⚠️ Ad image upload failed, continuing without image:', e);
     }
-    showUploadProgress(false);
   }
   
   const days = Math.floor(budget / 10);
-  await fetch(API+'/ads',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      title, 
-      budget, 
-      whatsapp_number: whatsapp, 
-      owner: currentUser.email,
-      image_url: imageUrl
-    })
-  });
   
-  byId('adTitle').value=''; 
-  byId('adBudget').value=''; 
-  byId('adWhatsapp').value='';
-  if(fileEl) fileEl.value='';
-  
-  msg.style.display = 'block';
-  msg.style.color = 'var(--accent)';
-  msg.textContent = `✅ Campaign submitted for ${days} days! Please send P${budget.toFixed(2)} via Orange Money to 72927417. Your campaign goes live once we confirm your payment.`;
-  setTimeout(()=>{ msg.style.display='none'; }, 12000);
-  loadAds();
+  try {
+    await fetch(API+'/ads',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        title, 
+        budget, 
+        whatsapp_number: whatsapp, 
+        owner: currentUser.email,
+        image_url: imageUrl
+      })
+    });
+    
+    byId('adTitle').value=''; 
+    byId('adBudget').value=''; 
+    byId('adWhatsapp').value='';
+    if(fileEl) fileEl.value='';
+    
+    msg.style.display = 'block';
+    msg.style.color = 'var(--accent)';
+    msg.textContent = `✅ Campaign submitted for ${days} days! Please send P${budget.toFixed(2)} via Orange Money to 72927417. Your campaign goes live once we confirm your payment.`;
+    setTimeout(()=>{ msg.style.display='none'; }, 12000);
+    loadAds();
+  } catch(e) {
+    console.error('❌ Ad creation failed:', e);
+    alert('Failed to create ad: ' + e.message);
+  }
 }
 
 async function loadAds(){
