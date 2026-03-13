@@ -166,7 +166,6 @@ class Ad(db.Model):
     owner_email      = db.Column(db.Text)
     whatsapp_number  = db.Column(db.Text, default="")
     budget           = db.Column(db.Float, default=0.0)
-    image_url        = db.Column(db.Text, default="")
     impressions      = db.Column(db.Integer, default=0)
     clicks           = db.Column(db.Integer, default=0)
     approved         = db.Column(db.Integer, default=0)  # 0=pending, 1=approved, 2=rejected
@@ -177,7 +176,7 @@ class Ad(db.Model):
         return {
             "id": self.id, "title": self.title, "owner_email": self.owner_email,
             "whatsapp_number": self.whatsapp_number or "",
-            "budget": self.budget, "image_url": self.image_url or "", "impressions": self.impressions, "clicks": self.clicks,
+            "budget": self.budget, "impressions": self.impressions, "clicks": self.clicks,
             "approved": self.approved, "expiry_date": self.expiry_date or "",
         }
 
@@ -1675,13 +1674,6 @@ body::after {
               <div class="form-label" style="margin-bottom:6px">WhatsApp Number</div>
               <input id="adWhatsapp" class="form-input" placeholder="e.g. 26772927417" style="width:100%" />
             </div>
-          </div>
-          <div style="margin-top:12px">
-            <div class="form-label" style="margin-bottom:6px">📸 Ad Image (Optional)</div>
-            <input id="adImageFile" type="file" accept="image/*" style="width:100%;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:#8899b4;font-size:13px" />
-            <div style="font-size:11px;color:var(--muted2);margin-top:4px">JPG, PNG - max 10MB (recommended 1200x628px)</div>
-          </div>
-          <div style="margin-top:12px;display:flex;gap:8px">
             <button class="btn-primary" onclick="createAd()">Submit →</button>
           </div>
           <div id="adMsg" style="margin-top:12px;font-size:13px;line-height:1.6;display:none"></div>
@@ -1977,11 +1969,24 @@ async function uploadFile(file, folder='vibenet/posts'){
   let fileToUpload = file;
   let thumbnailBlob = null;
   
-  console.log('🎬 uploadFile called:', file.name, 'size:', file.size, 'type:', file.type);
+  console.log('🎬 uploadFile called:', file.name, 'size:', file.size);
   
   try {
-    // ALWAYS compress videos to MP4 H.264 for universal compatibility
-    if(isVideo){
+    // Compress video if larger than 10MB
+    if(isVideo && file.size > 10 * 1024 * 1024){
+      showUploadProgress(true, `Compressing video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      try {
+        fileToUpload = await compressVideo(file);
+        showUploadProgress(true, `Extracting thumbnail...`);
+        thumbnailBlob = await extractVideoThumbnail(fileToUpload);
+        showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+      } catch(compressionError) {
+        console.warn('⚠️ Compression/thumbnail failed, uploading original:', compressionError);
+        fileToUpload = file;
+        thumbnailBlob = null;
+        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      }
+    } else if(isVideo) {
       showUploadProgress(true, `Extracting thumbnail...`);
       try {
         thumbnailBlob = await extractVideoThumbnail(file);
@@ -1994,23 +1999,7 @@ async function uploadFile(file, folder='vibenet/posts'){
         console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
         thumbnailBlob = null;
       }
-      
-      // ALWAYS compress video - ensures H.264/MP4 compatibility
-      showUploadProgress(true, `Preparing video...`);
-      try {
-        console.log('📦 Starting compression/conversion...');
-        fileToUpload = await Promise.race([
-          compressVideo(file),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Compression timeout')), 60000))  // 60 sec timeout
-        ]);
-        console.log('✅ Compression done:', fileToUpload.size, 'bytes');
-        showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
-      } catch(compressionError) {
-        console.error('⚠️ Compression failed or timeout:', compressionError);
-        // Just use original file
-        fileToUpload = file;
-        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
-      }
+      showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     } else {
       showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     }
@@ -2027,13 +2016,10 @@ async function uploadFile(file, folder='vibenet/posts'){
     
     console.log('🌐 Posting to:', API + '/upload');
     
-    const res = await Promise.race([
-      fetch(API + '/upload', {
-        method: 'POST',
-        body: fd
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timeout')), 120000))  // 2 min timeout
-    ]);
+    const res = await fetch(API + '/upload', {
+      method: 'POST',
+      body: fd
+    });
     
     console.log('📡 Response status:', res.status);
     
@@ -2177,48 +2163,26 @@ async function extractVideoThumbnail(file){
 }
 
 async function compressVideo(file){
-  // Skip compression for small files (< 5MB) - just use original
-  if(file.size < 5 * 1024 * 1024){
-    console.log('⚡ File is small, skipping compression');
-    // If already MP4, return as-is
-    if(file.type === 'video/mp4' || file.name.endsWith('.mp4')){
-      console.log('✅ Already MP4, using original');
-      return file;
-    }
-  }
+  const { FFmpeg, toBlobURL } = FFmpeg;
+  const ffmpeg = new FFmpeg.FFmpeg();
+  const coreURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js`, 'text/javascript');
+  const wasmURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm`, 'application/wasm');
   
-  try {
-    const { FFmpeg, toBlobURL } = FFmpeg;
-    const ffmpeg = new FFmpeg.FFmpeg();
-    const coreURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js`, 'text/javascript');
-    const wasmURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm`, 'application/wasm');
-    
-    console.log('📦 Loading FFmpeg...');
-    await ffmpeg.load({ coreURL, wasmURL });
-    
-    const inputName = 'input.' + file.name.split('.').pop();
-    const outputName = 'output.mp4';
-    
-    const buffer = await file.arrayBuffer();
-    ffmpeg.FS('writeFile', inputName, new Uint8Array(buffer));
-    
-    console.log('⚙️ Compressing with FFmpeg (veryfast preset)...');
-    // veryfast instead of ultrafast = faster without quality loss
-    await ffmpeg.run('-i', inputName, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-vf', 'scale=1280:-1', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', outputName);
-    
-    const data = ffmpeg.FS('readFile', outputName);
-    ffmpeg.FS('unlink', inputName);
-    ffmpeg.FS('unlink', outputName);
-    
-    console.log('✅ Compression done');
-    return new File([data.buffer], file.name.replace(/\.[^/.]+$/, '.mp4'), { type: 'video/mp4' });
-  } catch(e) {
-    console.error('❌ Compression error:', e);
-    // If compression fails, try to return original as MP4
-    console.log('📥 Falling back to original file');
-    return file;
-  }
-}
+  await ffmpeg.load({ coreURL, wasmURL });
+  
+  const inputName = 'input.' + file.name.split('.').pop();
+  const outputName = 'output.mp4';
+  
+  const buffer = await file.arrayBuffer();
+  ffmpeg.FS('writeFile', inputName, new Uint8Array(buffer));
+  
+  await ffmpeg.run('-i', inputName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-vf', 'scale=1280:-1', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName);
+  
+  const data = ffmpeg.FS('readFile', outputName);
+  ffmpeg.FS('unlink', inputName);
+  ffmpeg.FS('unlink', outputName);
+  
+  return new File([data.buffer], file.name.replace(/\.[^/.]+$/, '.mp4'), { type: 'video/mp4' });
 }
 
 function optimizeCldUrl(url, isVideo){
@@ -2464,12 +2428,8 @@ function createPostElement(p){
             v.src = v.dataset.src;
             delete v.dataset.src;
             vObs.disconnect();
-            console.log('▶️ Video src loaded:', v.src);
             // Thumbnail after src loads
-            v.addEventListener('loadedmetadata', ()=>{ 
-              console.log('📹 Video metadata loaded');
-              v.currentTime = 0.05; 
-            });
+            v.addEventListener('loadedmetadata', ()=>{ v.currentTime = 0.05; });
             v.addEventListener('seeked', ()=>{
               if(v.dataset.thumbDone) return;
               v.dataset.thumbDone = '1';
@@ -2479,14 +2439,8 @@ function createPostElement(p){
                 canvas.height = v.videoHeight || 360;
                 canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
                 v.poster = canvas.toDataURL('image/jpeg', 0.7);
-              } catch(e){ console.warn('Poster gen failed:', e); }
+              } catch(e){}
             }, { once: true });
-          }
-          
-          // AUTO-PAUSE: Stop video when it leaves viewport
-          if(!e.isIntersecting && !v.paused){
-            console.log('⏸️ Auto-pausing video (out of view)');
-            v.pause();
           }
         });
       }, { rootMargin: '300px' });
@@ -2634,17 +2588,7 @@ function createAdCard(ad){
   const waLink = waNumber ? 'https://wa.me/' + waNumber + '?text=' + waMsg : '';
   const div = document.createElement('div');
   div.style.cssText = 'background:linear-gradient(135deg,rgba(77,240,192,0.06),rgba(0,201,255,0.04));border:1px solid rgba(77,240,192,0.2);border-radius:16px;padding:16px 18px;margin-bottom:12px;cursor:' + (waLink?'pointer':'default');
-  
-  let contentHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span style="background:rgba(77,240,192,0.15);color:#4DF0C0;font-size:10px;font-weight:800;padding:3px 8px;border-radius:100px;letter-spacing:0.8px">SPONSORED</span>' + (waLink ? '<span style="font-size:11px;color:#25D366;font-weight:600">Tap to chat →</span>' : '') + '</div>';
-  
-  // Show image if available
-  if(ad.image_url){
-    contentHTML += '<img src="' + escapeHtml(ad.image_url) + '" style="width:100%;border-radius:12px;margin-bottom:12px;max-height:300px;object-fit:cover" onerror="this.style.display=\'none\'" />';
-  }
-  
-  contentHTML += '<div style="font-size:15px;font-weight:700;color:#e8f0ff;margin-bottom:12px">' + escapeHtml(ad.title||'') + '</div>';
-  div.innerHTML = contentHTML;
-  
+  div.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span style="background:rgba(77,240,192,0.15);color:#4DF0C0;font-size:10px;font-weight:800;padding:3px 8px;border-radius:100px;letter-spacing:0.8px">SPONSORED</span>' + (waLink ? '<span style="font-size:11px;color:#25D366;font-weight:600">Tap to chat →</span>' : '') + '</div><div style="font-size:15px;font-weight:700;color:#e8f0ff;margin-bottom:12px">' + escapeHtml(ad.title||'') + '</div>';
   if(waLink){
     const btn = document.createElement('a');
     btn.href = waLink;
@@ -2792,48 +2736,13 @@ async function createAd(){
   const title    = byId('adTitle').value.trim();
   const budget   = parseFloat(byId('adBudget').value||0);
   const whatsapp = byId('adWhatsapp').value.trim();
-  const fileEl   = byId('adImageFile');
   const msg      = byId('adMsg');
-  
   if(!title){ alert('Please enter a campaign title.'); return; }
   if(!whatsapp){ alert('Please enter your WhatsApp number.'); return; }
   if(budget < 150){ alert('Minimum budget is P150 (15 days). P10 per day.'); return; }
-  
-  let imageUrl = '';
-  
-  // Upload image if provided
-  if(fileEl && fileEl.files[0]){
-    try {
-      showUploadProgress(true, 'Uploading ad image...');
-      const result = await uploadFile(fileEl.files[0]);
-      if(result.url){
-        imageUrl = result.url;
-        console.log('✅ Ad image uploaded:', imageUrl);
-      }
-    } catch(e) {
-      console.warn('⚠️ Ad image upload failed, continuing without:', e);
-    }
-    showUploadProgress(false);
-  }
-  
   const days = Math.floor(budget / 10);
-  await fetch(API+'/ads',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({
-      title, 
-      budget, 
-      whatsapp_number: whatsapp, 
-      owner: currentUser.email,
-      image_url: imageUrl
-    })
-  });
-  
-  byId('adTitle').value=''; 
-  byId('adBudget').value=''; 
-  byId('adWhatsapp').value='';
-  if(fileEl) fileEl.value='';
-  
+  await fetch(API+'/ads',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title, budget, whatsapp_number: whatsapp, owner: currentUser.email})});
+  byId('adTitle').value=''; byId('adBudget').value=''; byId('adWhatsapp').value='';
   msg.style.display = 'block';
   msg.style.color = 'var(--accent)';
   msg.textContent = `✅ Campaign submitted for ${days} days! Please send P${budget.toFixed(2)} via Orange Money to 72927417. Your campaign goes live once we confirm your payment.`;
@@ -3507,7 +3416,6 @@ def api_ads():
             owner_email     = data.get("owner"),
             whatsapp_number = data.get("whatsapp_number", ""),
             budget          = budget,
-            image_url       = data.get("image_url", ""),
             approved        = 0,
             expiry_date     = expiry,
         )
