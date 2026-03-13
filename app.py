@@ -166,6 +166,7 @@ class Ad(db.Model):
     owner_email      = db.Column(db.Text)
     whatsapp_number  = db.Column(db.Text, default="")
     budget           = db.Column(db.Float, default=0.0)
+    image_url        = db.Column(db.Text, default="")
     impressions      = db.Column(db.Integer, default=0)
     clicks           = db.Column(db.Integer, default=0)
     approved         = db.Column(db.Integer, default=0)  # 0=pending, 1=approved, 2=rejected
@@ -176,7 +177,7 @@ class Ad(db.Model):
         return {
             "id": self.id, "title": self.title, "owner_email": self.owner_email,
             "whatsapp_number": self.whatsapp_number or "",
-            "budget": self.budget, "impressions": self.impressions, "clicks": self.clicks,
+            "budget": self.budget, "image_url": self.image_url or "", "impressions": self.impressions, "clicks": self.clicks,
             "approved": self.approved, "expiry_date": self.expiry_date or "",
         }
 
@@ -1676,6 +1677,13 @@ body::after {
             </div>
             <button class="btn-primary" onclick="createAd()">Submit →</button>
           </div>
+          <div style="margin-top:12px;display:flex;gap:10px;align-items:flex-end">
+            <div style="flex:1;min-width:160px">
+              <div class="form-label" style="margin-bottom:6px">📸 Ad Image (Optional)</div>
+              <input id="adImageFile" type="file" accept="image/*" style="width:100%;padding:8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:#8899b4;font-size:13px" />
+              <div style="font-size:11px;color:var(--muted2);margin-top:4px">JPG, PNG - max 10MB</div>
+            </div>
+          </div>
           <div id="adMsg" style="margin-top:12px;font-size:13px;line-height:1.6;display:none"></div>
         </div>
 
@@ -2421,7 +2429,7 @@ function createPostElement(p){
       v.style.background = '#0d1117';
       if(p.thumbnail_url) v.poster = p.thumbnail_url;
 
-      // Lazy load: set src when near viewport
+      // Lazy load: set src when near viewport + AUTO-PAUSE when scrolled away
       const vObs = new IntersectionObserver(entries => {
         entries.forEach(e => {
           if(e.isIntersecting && v.dataset.src){
@@ -2441,6 +2449,12 @@ function createPostElement(p){
                 v.poster = canvas.toDataURL('image/jpeg', 0.7);
               } catch(e){}
             }, { once: true });
+          }
+          
+          // AUTO-PAUSE: Stop video when it scrolls out of view
+          if(!e.isIntersecting && !v.paused){
+            v.pause();
+            console.log('⏸️ Auto-paused video (scrolled away)');
           }
         });
       }, { rootMargin: '300px' });
@@ -2736,13 +2750,48 @@ async function createAd(){
   const title    = byId('adTitle').value.trim();
   const budget   = parseFloat(byId('adBudget').value||0);
   const whatsapp = byId('adWhatsapp').value.trim();
+  const fileEl   = byId('adImageFile');
   const msg      = byId('adMsg');
+  
   if(!title){ alert('Please enter a campaign title.'); return; }
   if(!whatsapp){ alert('Please enter your WhatsApp number.'); return; }
   if(budget < 150){ alert('Minimum budget is P150 (15 days). P10 per day.'); return; }
+  
+  let imageUrl = '';
+  
+  // Upload image if provided
+  if(fileEl && fileEl.files[0]){
+    try {
+      showUploadProgress(true, 'Uploading ad image...');
+      const result = await uploadFile(fileEl.files[0]);
+      if(result.url){
+        imageUrl = result.url;
+        console.log('✅ Ad image uploaded:', imageUrl);
+      }
+    } catch(e) {
+      console.warn('⚠️ Ad image upload failed, continuing without image:', e);
+    }
+    showUploadProgress(false);
+  }
+  
   const days = Math.floor(budget / 10);
-  await fetch(API+'/ads',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title, budget, whatsapp_number: whatsapp, owner: currentUser.email})});
-  byId('adTitle').value=''; byId('adBudget').value=''; byId('adWhatsapp').value='';
+  await fetch(API+'/ads',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      title, 
+      budget, 
+      whatsapp_number: whatsapp, 
+      owner: currentUser.email,
+      image_url: imageUrl
+    })
+  });
+  
+  byId('adTitle').value=''; 
+  byId('adBudget').value=''; 
+  byId('adWhatsapp').value='';
+  if(fileEl) fileEl.value='';
+  
   msg.style.display = 'block';
   msg.style.color = 'var(--accent)';
   msg.textContent = `✅ Campaign submitted for ${days} days! Please send P${budget.toFixed(2)} via Orange Money to 72927417. Your campaign goes live once we confirm your payment.`;
@@ -3416,6 +3465,7 @@ def api_ads():
             owner_email     = data.get("owner"),
             whatsapp_number = data.get("whatsapp_number", ""),
             budget          = budget,
+            image_url       = data.get("image_url", ""),
             approved        = 0,
             expiry_date     = expiry,
         )
