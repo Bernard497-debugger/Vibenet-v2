@@ -342,7 +342,7 @@ PRIVACY_HTML = r"""<!doctype html>
   <a href="/" class="back">← Back to VibeNet</a>
   <div class="logo">⚡ VibeNet</div>
   <h1>Privacy Policy</h1>
-  <div class="subtitle">Last updated: January 2025 · Effective immediately</div>
+  <div class="subtitle">Last updated: March 2026 · Effective immediately</div>
 
   <h2>1. Who We Are</h2>
   <p>VibeNet is a social media and creator monetisation platform operated in Botswana. We are committed to protecting your personal information in accordance with the <strong>Botswana Data Protection Act, 2018</strong>.</p>
@@ -440,7 +440,7 @@ TERMS_HTML = r"""<!doctype html>
   <a href="/" class="back">← Back to VibeNet</a>
   <div class="logo">⚡ VibeNet</div>
   <h1>Terms &amp; Conditions</h1>
-  <div class="subtitle">Last updated: January 2025 · By using VibeNet you agree to these terms</div>
+  <div class="subtitle">Last updated: March 2026 · By using VibeNet you agree to these terms</div>
 
   <div class="highlight">
     <strong style="color:#e8f0ff">Summary:</strong> Be respectful, post original content, don't scam people, and follow Botswana law. We reserve the right to remove content and ban accounts that violate these terms.
@@ -3085,7 +3085,7 @@ async function refreshAll(){ await loadFeed(true); await loadNotifications(); aw
     <a href="/privacy" target="_blank" style="color:#5a6a85;text-decoration:none">Privacy Policy</a>
     <a href="/terms" target="_blank" style="color:#5a6a85;text-decoration:none">Terms &amp; Conditions</a>
   </div>
-  <div style="font-size:11px;color:#2a3a50;margin-top:10px">© 2025 VibeNet. All rights reserved.</div>
+  <div style="font-size:11px;color:#2a3a50;margin-top:10px">© 2026 VibeNet. All rights reserved.</div>
 </div>
 
 </body>
