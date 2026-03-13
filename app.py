@@ -3117,9 +3117,13 @@ def api_upload():
         
         print(f"📥 Upload starting: {f.filename} ({len(data)} bytes, mime: {mime})")
         
-        # Optional thumbnail
+        # Check if it's a video
+        is_video = mime.startswith('video/') or f.filename.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm'))
+        print(f"📹 Is video: {is_video}")
+        
+        # Optional thumbnail (only for videos)
         thumbnail_url = ""
-        if "thumbnail" in request.files:
+        if "thumbnail" in request.files and is_video:
             thumb = request.files["thumbnail"]
             thumbnail_data = thumb.read()
             print(f"🖼️ Thumbnail provided: {len(thumbnail_data)} bytes")
@@ -3143,20 +3147,23 @@ def api_upload():
                     timeout=60
                 )
                 
-                print(f"📸 Thumbnail response: {thumb_resp.status_code} - {thumb_resp.text[:100]}")
+                print(f"📸 Thumbnail response: {thumb_resp.status_code}")
                 
                 if thumb_resp.status_code in (200, 201):
                     thumbnail_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{thumb_path}"
                     print(f"✅ Thumbnail uploaded: {thumbnail_url}")
             except Exception as e:
                 print(f"❌ Thumbnail upload failed: {e}")
-                import traceback
-                traceback.print_exc()
 
-        # Upload main video/file to Supabase
+        # Upload main file to Supabase
         try:
             file_id = uuid.uuid4().hex
             file_ext = os.path.splitext(f.filename)[1] or ".bin"
+            
+            # Ensure video files are .mp4
+            if is_video and not file_ext.lower() == '.mp4':
+                file_ext = '.mp4'
+            
             file_path = f"posts/{file_id}{file_ext}"
             
             headers = {
@@ -3165,9 +3172,10 @@ def api_upload():
             }
             upload_url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{file_path}"
             
-            print(f"📤 Uploading video to: {upload_url}")
+            print(f"📤 Uploading to: {upload_url}")
             print(f"📤 File size: {len(data)} bytes")
             print(f"📤 Content-Type: {mime}")
+            print(f"📤 Is video: {is_video}")
             
             response = requests.post(
                 upload_url,
@@ -3176,18 +3184,18 @@ def api_upload():
                 timeout=300
             )
             
-            print(f"📡 Upload response status: {response.status_code}")
-            print(f"📡 Upload response text: {response.text[:200]}")
+            print(f"📡 Response status: {response.status_code}")
+            print(f"📡 Response text: {response.text[:200]}")
             
             if response.status_code in (200, 201):
                 public_url = f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{file_path}"
-                print(f"✅ Video uploaded successfully!")
-                print(f"✅ Video URL: {public_url}")
+                print(f"✅ Upload successful!")
+                print(f"✅ URL: {public_url}")
                 return jsonify({"url": public_url, "thumbnail": thumbnail_url})
             else:
-                print(f"❌ Supabase upload failed: {response.status_code}")
-                print(f"❌ Response: {response.text}")
-                return jsonify({"error": f"Supabase error {response.status_code}: {response.text[:100]}"}), 503
+                print(f"❌ Upload failed: {response.status_code}")
+                print(f"❌ Error: {response.text}")
+                return jsonify({"error": f"Upload failed: {response.text[:100]}"}), 503
                 
         except Exception as e:
             print(f"❌ Upload exception: {e}")
