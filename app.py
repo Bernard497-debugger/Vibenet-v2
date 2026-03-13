@@ -2603,7 +2603,20 @@ function createAdCard(ad){
   const waLink = waNumber ? 'https://wa.me/' + waNumber + '?text=' + waMsg : '';
   const div = document.createElement('div');
   div.style.cssText = 'background:linear-gradient(135deg,rgba(77,240,192,0.06),rgba(0,201,255,0.04));border:1px solid rgba(77,240,192,0.2);border-radius:16px;padding:16px 18px;margin-bottom:12px;cursor:' + (waLink?'pointer':'default');
-  div.innerHTML = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span style="background:rgba(77,240,192,0.15);color:#4DF0C0;font-size:10px;font-weight:800;padding:3px 8px;border-radius:100px;letter-spacing:0.8px">SPONSORED</span>' + (waLink ? '<span style="font-size:11px;color:#25D366;font-weight:600">Tap to chat →</span>' : '') + '</div><div style="font-size:15px;font-weight:700;color:#e8f0ff;margin-bottom:12px">' + escapeHtml(ad.title||'') + '</div>';
+  
+  // Header with SPONSORED badge
+  let html = '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><span style="background:rgba(77,240,192,0.15);color:#4DF0C0;font-size:10px;font-weight:800;padding:3px 8px;border-radius:100px;letter-spacing:0.8px">SPONSORED</span>' + (waLink ? '<span style="font-size:11px;color:#25D366;font-weight:600">Tap to chat →</span>' : '') + '</div>';
+  
+  // Show image if available
+  if(ad.image_url){
+    html += '<img src="' + escapeHtml(ad.image_url) + '" style="width:100%;border-radius:12px;margin-bottom:12px;max-height:300px;object-fit:cover" onerror="this.style.display=\'none\'" />';
+  }
+  
+  // Title
+  html += '<div style="font-size:15px;font-weight:700;color:#e8f0ff;margin-bottom:12px">' + escapeHtml(ad.title||'') + '</div>';
+  
+  div.innerHTML = html;
+  
   if(waLink){
     const btn = document.createElement('a');
     btn.href = waLink;
