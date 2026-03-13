@@ -1996,17 +1996,20 @@ async function uploadFile(file, folder='vibenet/posts'){
       }
       
       // ALWAYS compress video - ensures H.264/MP4 compatibility
-      showUploadProgress(true, `Compressing video to MP4 (${(file.size/1024/1024).toFixed(1)}MB)...`);
+      showUploadProgress(true, `Preparing video...`);
       try {
-        console.log('📦 Starting compression...');
-        fileToUpload = await compressVideo(file);
+        console.log('📦 Starting compression/conversion...');
+        fileToUpload = await Promise.race([
+          compressVideo(file),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Compression timeout')), 60000))  // 60 sec timeout
+        ]);
         console.log('✅ Compression done:', fileToUpload.size, 'bytes');
         showUploadProgress(true, `Uploading video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
       } catch(compressionError) {
-        console.error('❌ Compression failed:', compressionError);
-        console.error('Stack:', compressionError.stack);
-        // Try to upload original anyway
-        showUploadProgress(true, `Uploading original video (${(file.size/1024/1024).toFixed(1)}MB)...`);
+        console.error('⚠️ Compression failed or timeout:', compressionError);
+        // Just use original file
+        fileToUpload = file;
+        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
       }
     } else {
       showUploadProgress(true, `Uploading image (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
@@ -2024,10 +2027,13 @@ async function uploadFile(file, folder='vibenet/posts'){
     
     console.log('🌐 Posting to:', API + '/upload');
     
-    const res = await fetch(API + '/upload', {
-      method: 'POST',
-      body: fd
-    });
+    const res = await Promise.race([
+      fetch(API + '/upload', {
+        method: 'POST',
+        body: fd
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Upload timeout')), 120000))  // 2 min timeout
+    ]);
     
     console.log('📡 Response status:', res.status);
     
@@ -2171,26 +2177,48 @@ async function extractVideoThumbnail(file){
 }
 
 async function compressVideo(file){
-  const { FFmpeg, toBlobURL } = FFmpeg;
-  const ffmpeg = new FFmpeg.FFmpeg();
-  const coreURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js`, 'text/javascript');
-  const wasmURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm`, 'application/wasm');
+  // Skip compression for small files (< 5MB) - just use original
+  if(file.size < 5 * 1024 * 1024){
+    console.log('⚡ File is small, skipping compression');
+    // If already MP4, return as-is
+    if(file.type === 'video/mp4' || file.name.endsWith('.mp4')){
+      console.log('✅ Already MP4, using original');
+      return file;
+    }
+  }
   
-  await ffmpeg.load({ coreURL, wasmURL });
-  
-  const inputName = 'input.' + file.name.split('.').pop();
-  const outputName = 'output.mp4';
-  
-  const buffer = await file.arrayBuffer();
-  ffmpeg.FS('writeFile', inputName, new Uint8Array(buffer));
-  
-  await ffmpeg.run('-i', inputName, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-vf', 'scale=1280:-1', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', outputName);
-  
-  const data = ffmpeg.FS('readFile', outputName);
-  ffmpeg.FS('unlink', inputName);
-  ffmpeg.FS('unlink', outputName);
-  
-  return new File([data.buffer], file.name.replace(/\.[^/.]+$/, '.mp4'), { type: 'video/mp4' });
+  try {
+    const { FFmpeg, toBlobURL } = FFmpeg;
+    const ffmpeg = new FFmpeg.FFmpeg();
+    const coreURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.js`, 'text/javascript');
+    const wasmURL = await toBlobURL(`https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/ffmpeg-core.wasm`, 'application/wasm');
+    
+    console.log('📦 Loading FFmpeg...');
+    await ffmpeg.load({ coreURL, wasmURL });
+    
+    const inputName = 'input.' + file.name.split('.').pop();
+    const outputName = 'output.mp4';
+    
+    const buffer = await file.arrayBuffer();
+    ffmpeg.FS('writeFile', inputName, new Uint8Array(buffer));
+    
+    console.log('⚙️ Compressing with FFmpeg (veryfast preset)...');
+    // veryfast instead of ultrafast = faster without quality loss
+    await ffmpeg.run('-i', inputName, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28', '-vf', 'scale=1280:-1', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', outputName);
+    
+    const data = ffmpeg.FS('readFile', outputName);
+    ffmpeg.FS('unlink', inputName);
+    ffmpeg.FS('unlink', outputName);
+    
+    console.log('✅ Compression done');
+    return new File([data.buffer], file.name.replace(/\.[^/.]+$/, '.mp4'), { type: 'video/mp4' });
+  } catch(e) {
+    console.error('❌ Compression error:', e);
+    // If compression fails, try to return original as MP4
+    console.log('📥 Falling back to original file');
+    return file;
+  }
+}
 }
 
 function optimizeCldUrl(url, isVideo){
