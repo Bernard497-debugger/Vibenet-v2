@@ -995,6 +995,32 @@ body::after {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #4DF0C0;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+#uploadLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted2, #5a6a85);
+  margin-top: 6px;
+}
+
 /* ===== POST COMPOSER ===== */
 .composer {
   background: var(--card);
@@ -1957,7 +1983,7 @@ function showUploadProgress(show, label='Uploading...'){
   if(!p) return;
   if(show){
     p.style.display = 'block';
-    byId('uploadLabel').textContent = label;
+    byId('uploadLabel').innerHTML = '<span class="spinner"></span>' + label;
     byId('uploadBar').style.width = '0%';
     if(btn){ btn.disabled = true; btn.style.opacity = '0.5'; }
     let w = 0;
@@ -2281,6 +2307,7 @@ async function addPost(){
       if(isImage){
         // Images: Simple direct upload via FormData
         console.log('🖼️ Image - simple upload');
+        showUploadProgress(true, 'Uploading image...');
         const fd = new FormData();
         fd.append('file', file);
         
@@ -2290,6 +2317,7 @@ async function addPost(){
         });
         
         const j = await res.json();
+        showUploadProgress(false);
         if(j.url){
           url = j.url;
           console.log('✅ Image uploaded:', url);
