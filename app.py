@@ -2267,38 +2267,64 @@ async function addPost(){
   const text = byId('postText').value.trim();
   const fileEl = byId('fileUpload');
   let url = '', mime = '', thumbnail = '';
-  let uploadSucceeded = false;
   
-  // Handle file upload with BULLETPROOF error handling
+  // Handle file upload
   if(fileEl.files[0]){
-    mime = fileEl.files[0].type || 'application/octet-stream';
+    const file = fileEl.files[0];
+    mime = file.type || 'application/octet-stream';
+    const isImage = mime.startsWith('image/');
+    const isVideo = mime.startsWith('video/');
     
     try {
-      console.log('Starting upload:', fileEl.files[0].name);
-      const result = await uploadFile(fileEl.files[0]);
+      console.log('📤 Uploading:', file.name, 'Type:', mime);
       
-      // Check if upload actually succeeded
-      if(result && result.url){
-        url = result.url || '';
-        thumbnail = result.thumbnail || '';
-        uploadSucceeded = true;
-        console.log('✅ Upload successful:', url);
+      if(isImage){
+        // Images: Simple direct upload via FormData
+        console.log('🖼️ Image - simple upload');
+        const fd = new FormData();
+        fd.append('file', file);
+        
+        const res = await fetch(API + '/upload', {
+          method: 'POST',
+          body: fd
+        });
+        
+        const j = await res.json();
+        if(j.url){
+          url = j.url;
+          console.log('✅ Image uploaded:', url);
+        } else {
+          console.warn('⚠️ Image upload failed:', j.error);
+        }
+      } else if(isVideo) {
+        // Videos: Use uploadFile for compression
+        console.log('🎬 Video - compression + upload');
+        const result = await uploadFile(file);
+        if(result && result.url){
+          url = result.url;
+          thumbnail = result.thumbnail || '';
+          console.log('✅ Video uploaded:', url);
+        }
       } else {
-        console.warn('⚠️ Upload returned empty result, continuing with text only');
+        // Other files: Simple upload
+        console.log('📎 Other file - upload');
+        const fd = new FormData();
+        fd.append('file', file);
+        const res = await fetch(API + '/upload', {
+          method: 'POST',
+          body: fd
+        });
+        const j = await res.json();
+        if(j.url) url = j.url;
       }
     } catch(uploadError) {
-      // CRITICAL: Never let upload error block the post
-      console.error('❌ Upload error (continuing anyway):', uploadError);
-      console.error('Error details:', uploadError.message, uploadError.stack);
-      
-      // Don't show alert - just continue with text
-      // This way video failure doesn't kill the entire post
+      console.error('❌ Upload error:', uploadError.message);
       url = '';
       thumbnail = '';
     }
   }
   
-  // VALIDATION: Post must have either text OR successful file upload
+  // VALIDATION: Post must have either text OR file
   if(!text && !url){ 
     alert('Please write something or attach a file'); 
     return; 
@@ -2307,27 +2333,28 @@ async function addPost(){
   // Show posting state
   const btn = byId('postBtn');
   btn.disabled = true;
-  btn.textContent = '⏳ Posting...';
+  btn.innerHTML = '<span class="spinner"></span>Posting...';
+  btn.style.opacity = '0.7';
   
   try {
-    // Build payload with safety checks
+    // Build payload
     const payload = {
       author_email: currentUser.email,
       author_name: currentUser.name || 'Unknown',
       profile_pic: currentUser.profile_pic || '',
-      text: text || '',  // Text can be empty if file uploaded
-      file_url: url || '',  // File URL can be empty if text provided
-      file_mime: mime || '',  // MIME can be empty
-      thumbnail_url: thumbnail || ''  // Thumbnail can be empty
+      text: text || '',
+      file_url: url || '',
+      file_mime: mime || '',
+      thumbnail_url: thumbnail || ''
     };
     
-    console.log('Sending post payload:', payload);
+    console.log('📝 Post payload:', payload);
     
     const res = await fetch(API + '/posts', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload),
-      timeout: 60000  // 60 second timeout
+      timeout: 60000
     });
     
     const j = await res.json();
@@ -2340,11 +2367,14 @@ async function addPost(){
       fileEl.value = '';
       byId('fileNameDisplay').textContent = '';
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
       // Show success message
-      if(!uploadSucceeded && fileEl.files[0]){
-        alert('✅ Post created! (Video upload will process in background)');
+      if(url){
+        alert('✅ Post created with media!');
+      } else {
+        alert('✅ Post created!');
       }
       
       // Refresh everything
@@ -2359,6 +2389,7 @@ async function addPost(){
       console.error('❌ Validation error:', j);
       alert('❌ ' + (j.error || 'Post failed validation'));
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else if(res.status >= 500){
@@ -2366,6 +2397,7 @@ async function addPost(){
       console.error('❌ Server error:', j);
       alert('⚠️ Server error. Please try again in a few seconds.');
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else {
@@ -2373,6 +2405,7 @@ async function addPost(){
       console.error('❌ Unknown error:', res.status, j);
       alert('⚠️ Something went wrong. Please try again.');
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
     }
     
@@ -2381,6 +2414,7 @@ async function addPost(){
     console.error('❌ Network error:', networkError);
     alert('⚠️ Network error: ' + (networkError.message || 'Cannot reach server'));
     btn.textContent = 'Post →';
+    btn.style.opacity = '1';
     btn.disabled = false;
   }
 }
