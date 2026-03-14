@@ -2014,12 +2014,11 @@ async function uploadFile(file, folder='vibenet/posts'){
         fileToUpload = await compressVideo(file);
         showUploadProgress(true, `Extracting thumbnail...`);
         thumbnailBlob = await extractVideoThumbnail(fileToUpload);
-        showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
+        console.log('✅ Thumbnail extracted:', thumbnailBlob.size, 'bytes');
       } catch(compressionError) {
-        console.warn('⚠️ Compression failed, uploading original:', compressionError);
+        console.warn('⚠️ Compression failed, using original:', compressionError);
         fileToUpload = file;
         thumbnailBlob = null;
-        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
       }
     } else if(isVideo) {
       showUploadProgress(true, `Extracting thumbnail...`);
@@ -2027,86 +2026,58 @@ async function uploadFile(file, folder='vibenet/posts'){
         thumbnailBlob = await extractVideoThumbnail(file);
         if(thumbnailBlob) {
           console.log('✅ Thumbnail created:', thumbnailBlob.size, 'bytes');
-        } else {
-          console.warn('⚠️ Thumbnail is null, continuing without');
         }
       } catch(thumbnailError) {
-        console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
+        console.warn('⚠️ Thumbnail extraction failed:', thumbnailError);
         thumbnailBlob = null;
       }
-      showUploadProgress(true, `Uploading video to Supabase...`);
-    } else {
-      showUploadProgress(true, `Uploading image to Supabase...`);
     }
+    
+    showUploadProgress(true, `Uploading (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     
     console.log('📦 File ready:', fileToUpload.name, fileToUpload.size, 'bytes');
     
-    // Upload directly to Supabase Storage using JS SDK
-    const supabaseUrl = 'https://ekuulbfviwrumqigtvlz.supabase.co';
-    const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVrdXVsYmZ2aXdydW1xaWd0dmx6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDk2MTc1MDUsImV4cCI6MjAyNTI5NzUwNX0.EEp8XGXQlkqDrFrKr_7gZn7V9Hd8f2E-12JnGY4kyiE';
-    const bucket = 'vibenet';
+    // Upload via backend /api/upload endpoint
+    const fd = new FormData();
+    fd.append('file', fileToUpload);
+    if(thumbnailBlob) {
+      fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
+    }
     
-    const { createClient } = window.supabase;
-    const supabase = createClient(supabaseUrl, supabaseKey);
+    console.log('🌐 Uploading to /api/upload...');
     
-    // Generate unique filename
-    const ext = fileToUpload.name.split('.').pop();
-    const filename = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${ext}`;
-    const filepath = `${folder}/${filename}`;
+    const res = await fetch(API + '/upload', {
+      method: 'POST',
+      body: fd,
+      timeout: 120000  // 2 minutes
+    });
     
-    console.log('📤 Uploading to Supabase:', filepath);
+    const j = await res.json();
+    console.log('📡 Response:', res.status, j);
     
-    const { data, error } = await supabase.storage
-      .from(bucket)
-      .upload(filepath, fileToUpload, { upsert: false });
-    
-    if(error) {
-      console.error('❌ Supabase upload error:', error);
+    if(j.error) {
+      console.error('❌ Upload error:', j.error);
       showUploadProgress(false);
       return {url: '', thumbnail: ''};
     }
     
-    // Get public URL
-    const { data: publicData } = supabase.storage
-      .from(bucket)
-      .getPublicUrl(filepath);
-    
-    const publicUrl = publicData?.publicUrl || '';
-    console.log('✅ File uploaded to Supabase:', publicUrl);
-    
-    // Upload thumbnail if available
-    let thumbnailUrl = '';
-    if(thumbnailBlob && isVideo) {
-      try {
-        const thumbFilename = `${Date.now()}_thumb_${Math.random().toString(36).substr(2, 9)}.jpg`;
-        const thumbPath = `${folder}/thumbs/${thumbFilename}`;
-        
-        const { error: thumbError } = await supabase.storage
-          .from(bucket)
-          .upload(thumbPath, thumbnailBlob, { upsert: false });
-        
-        if(!thumbError) {
-          const { data: thumbData } = supabase.storage
-            .from(bucket)
-            .getPublicUrl(thumbPath);
-          thumbnailUrl = thumbData?.publicUrl || '';
-          console.log('✅ Thumbnail uploaded:', thumbnailUrl);
-        }
-      } catch(e) {
-        console.warn('⚠️ Thumbnail upload failed:', e);
-      }
+    if(!j.url) {
+      console.error('❌ No URL returned:', j);
+      showUploadProgress(false);
+      return {url: '', thumbnail: ''};
     }
     
+    console.log('✅ Upload successful:', j.url);
     showUploadProgress(false);
     
     return {
-      url: publicUrl,
-      thumbnail: thumbnailUrl
+      url: j.url || '',
+      thumbnail: j.thumbnail || ''
     };
     
   } catch(uploadError) {
-    showUploadProgress(false);
     console.error('❌ Upload exception:', uploadError);
+    showUploadProgress(false);
     return {url: '', thumbnail: ''};
   }
 }
