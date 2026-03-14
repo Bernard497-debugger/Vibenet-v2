@@ -995,6 +995,23 @@ body::after {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255,255,255,0.3);
+  border-top-color: #4DF0C0;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
 /* ===== POST COMPOSER ===== */
 .composer {
   background: var(--card);
@@ -2336,7 +2353,8 @@ async function addPost(){
   // Show posting state
   const btn = byId('postBtn');
   btn.disabled = true;
-  btn.textContent = '⏳ Posting...';
+  btn.innerHTML = '<span class="spinner"></span>Posting...';
+  btn.style.opacity = '0.7';
   
   try {
     // Build payload
@@ -2369,6 +2387,7 @@ async function addPost(){
       fileEl.value = '';
       byId('fileNameDisplay').textContent = '';
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
       // Show success message
@@ -2390,6 +2409,7 @@ async function addPost(){
       console.error('❌ Validation error:', j);
       alert('❌ ' + (j.error || 'Post failed validation'));
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else if(res.status >= 500){
@@ -2397,6 +2417,7 @@ async function addPost(){
       console.error('❌ Server error:', j);
       alert('⚠️ Server error. Please try again in a few seconds.');
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else {
@@ -2404,6 +2425,7 @@ async function addPost(){
       console.error('❌ Unknown error:', res.status, j);
       alert('⚠️ Something went wrong. Please try again.');
       btn.textContent = 'Post →';
+      btn.style.opacity = '1';
       btn.disabled = false;
     }
     
@@ -2412,6 +2434,7 @@ async function addPost(){
     console.error('❌ Network error:', networkError);
     alert('⚠️ Network error: ' + (networkError.message || 'Cannot reach server'));
     btn.textContent = 'Post →';
+    btn.style.opacity = '1';
     btn.disabled = false;
   }
 }
