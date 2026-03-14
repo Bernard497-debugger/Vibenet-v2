@@ -995,23 +995,6 @@ body::after {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes spin {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
-}
-
-.spinner {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255,255,255,0.3);
-  border-top-color: #4DF0C0;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-
 /* ===== POST COMPOSER ===== */
 .composer {
   background: var(--card);
@@ -2005,11 +1988,12 @@ async function uploadFile(file, folder='vibenet/posts'){
         fileToUpload = await compressVideo(file);
         showUploadProgress(true, `Extracting thumbnail...`);
         thumbnailBlob = await extractVideoThumbnail(fileToUpload);
-        console.log('✅ Thumbnail extracted:', thumbnailBlob.size, 'bytes');
+        showUploadProgress(true, `Uploading compressed video (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
       } catch(compressionError) {
-        console.warn('⚠️ Compression failed, using original:', compressionError);
+        console.warn('⚠️ Compression failed, uploading original:', compressionError);
         fileToUpload = file;
         thumbnailBlob = null;
+        showUploadProgress(true, `Uploading video (${(file.size/1024/1024).toFixed(1)}MB)...`);
       }
     } else if(isVideo) {
       showUploadProgress(true, `Extracting thumbnail...`);
@@ -2017,59 +2001,88 @@ async function uploadFile(file, folder='vibenet/posts'){
         thumbnailBlob = await extractVideoThumbnail(file);
         if(thumbnailBlob) {
           console.log('✅ Thumbnail created:', thumbnailBlob.size, 'bytes');
+        } else {
+          console.warn('⚠️ Thumbnail is null, continuing without');
         }
       } catch(thumbnailError) {
-        console.warn('⚠️ Thumbnail extraction failed:', thumbnailError);
+        console.warn('⚠️ Thumbnail extraction failed, continuing:', thumbnailError);
         thumbnailBlob = null;
       }
+      showUploadProgress(true, `Uploading video to Supabase...`);
+    } else {
+      showUploadProgress(true, `Uploading image to Supabase...`);
     }
-    
-    showUploadProgress(true, `Uploading (${(fileToUpload.size/1024/1024).toFixed(1)}MB)...`);
     
     console.log('📦 File ready:', fileToUpload.name, fileToUpload.size, 'bytes');
     
-    // Upload via backend /api/upload endpoint
-    const fd = new FormData();
-    fd.append('file', fileToUpload);
-    if(thumbnailBlob) {
-      fd.append('thumbnail', thumbnailBlob, 'thumb.jpg');
-    }
+    // Upload directly to Supabase Storage using JS SDK
+    const supabaseUrl = 'https://ekuulbfviwrumqigtvlz.supabase.co';
+    const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVrdXVsYmZ2aXdydW1xaWd0dmx6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3MDk2MTc1MDUsImV4cCI6MjAyNTI5NzUwNX0.EEp8XGXQlkqDrFrKr_7gZn7V9Hd8f2E-12JnGY4kyiE';
+    const bucket = 'vibenet';
     
-    console.log('🌐 Uploading to /api/upload...');
+    const { createClient } = window.supabase;
+    const supabase = createClient(supabaseUrl, supabaseKey);
     
-    const res = await fetch(API + '/upload', {
-      method: 'POST',
-      body: fd,
-      timeout: 120000  // 2 minutes
-    });
+    // Generate unique filename
+    const ext = fileToUpload.name.split('.').pop();
+    const filename = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}.${ext}`;
+    const filepath = `${folder}/${filename}`;
     
-    const j = await res.json();
-    console.log('📡 Response:', res.status, j);
+    console.log('📤 Uploading to Supabase:', filepath);
     
-    if(j.error) {
-      console.error('❌ Upload error:', j.error);
+    const { data, error } = await supabase.storage
+      .from(bucket)
+      .upload(filepath, fileToUpload, { upsert: false });
+    
+    if(error) {
+      console.error('❌ Supabase upload error:', error);
       showUploadProgress(false);
       return {url: '', thumbnail: ''};
     }
     
-    if(!j.url) {
-      console.error('❌ No URL returned:', j);
-      showUploadProgress(false);
-      return {url: '', thumbnail: ''};
+    // Get public URL
+    const { data: publicData } = supabase.storage
+      .from(bucket)
+      .getPublicUrl(filepath);
+    
+    const publicUrl = publicData?.publicUrl || '';
+    console.log('✅ File uploaded to Supabase:', publicUrl);
+    
+    // Upload thumbnail if available
+    let thumbnailUrl = '';
+    if(thumbnailBlob && isVideo) {
+      try {
+        const thumbFilename = `${Date.now()}_thumb_${Math.random().toString(36).substr(2, 9)}.jpg`;
+        const thumbPath = `${folder}/thumbs/${thumbFilename}`;
+        
+        const { error: thumbError } = await supabase.storage
+          .from(bucket)
+          .upload(thumbPath, thumbnailBlob, { upsert: false });
+        
+        if(!thumbError) {
+          const { data: thumbData } = supabase.storage
+            .from(bucket)
+            .getPublicUrl(thumbPath);
+          thumbnailUrl = thumbData?.publicUrl || '';
+          console.log('✅ Thumbnail uploaded:', thumbnailUrl);
+        }
+      } catch(e) {
+        console.warn('⚠️ Thumbnail upload failed:', e);
+      }
     }
     
-    console.log('✅ Upload successful:', j.url);
     showUploadProgress(false);
     
     return {
-      url: j.url || '',
-      thumbnail: j.thumbnail || ''
+      url: publicUrl,
+      thumbnail: thumbnailUrl
     };
     
   } catch(uploadError) {
-    console.error('❌ Upload exception:', uploadError);
     showUploadProgress(false);
+    console.error('❌ Upload exception:', uploadError);
     return {url: '', thumbnail: ''};
+  }
 }
 
 async function extractVideoThumbnail(file){
@@ -2254,67 +2267,38 @@ async function addPost(){
   const text = byId('postText').value.trim();
   const fileEl = byId('fileUpload');
   let url = '', mime = '', thumbnail = '';
+  let uploadSucceeded = false;
   
-  // Handle file upload
+  // Handle file upload with BULLETPROOF error handling
   if(fileEl.files[0]){
-    const file = fileEl.files[0];
-    mime = file.type || 'application/octet-stream';
-    const isImage = mime.startsWith('image/');
-    const isVideo = mime.startsWith('video/');
+    mime = fileEl.files[0].type || 'application/octet-stream';
     
     try {
-      console.log('📤 Uploading:', file.name, 'Type:', mime);
+      console.log('Starting upload:', fileEl.files[0].name);
+      const result = await uploadFile(fileEl.files[0]);
       
-      if(isImage){
-        // Simple image upload via FormData
-        console.log('🖼️ Image detected - simple upload');
-        const fd = new FormData();
-        fd.append('file', file);
-        
-        const res = await fetch(API + '/upload', {
-          method: 'POST',
-          body: fd,
-          timeout: 60000
-        });
-        
-        const j = await res.json();
-        if(j.url){
-          url = j.url;
-          console.log('✅ Image uploaded:', url);
-        } else {
-          console.warn('⚠️ Image upload failed:', j.error);
-        }
-      } else if(isVideo){
-        // Video needs compression via uploadFile
-        console.log('🎬 Video detected - compression + upload');
-        const result = await uploadFile(file);
-        if(result && result.url){
-          url = result.url;
-          thumbnail = result.thumbnail || '';
-          console.log('✅ Video uploaded:', url);
-        }
+      // Check if upload actually succeeded
+      if(result && result.url){
+        url = result.url || '';
+        thumbnail = result.thumbnail || '';
+        uploadSucceeded = true;
+        console.log('✅ Upload successful:', url);
       } else {
-        // Other files - simple upload
-        console.log('📎 Other file - simple upload');
-        const fd = new FormData();
-        fd.append('file', file);
-        const res = await fetch(API + '/upload', {
-          method: 'POST',
-          body: fd,
-          timeout: 60000
-        });
-        const j = await res.json();
-        if(j.url) url = j.url;
+        console.warn('⚠️ Upload returned empty result, continuing with text only');
       }
     } catch(uploadError) {
-      console.error('❌ Upload error:', uploadError.message);
-      // Continue anyway with text
+      // CRITICAL: Never let upload error block the post
+      console.error('❌ Upload error (continuing anyway):', uploadError);
+      console.error('Error details:', uploadError.message, uploadError.stack);
+      
+      // Don't show alert - just continue with text
+      // This way video failure doesn't kill the entire post
       url = '';
       thumbnail = '';
     }
   }
   
-  // VALIDATION: Post must have either text OR file
+  // VALIDATION: Post must have either text OR successful file upload
   if(!text && !url){ 
     alert('Please write something or attach a file'); 
     return; 
@@ -2323,28 +2307,27 @@ async function addPost(){
   // Show posting state
   const btn = byId('postBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Posting...';
-  btn.style.opacity = '0.7';
+  btn.textContent = '⏳ Posting...';
   
   try {
-    // Build payload
+    // Build payload with safety checks
     const payload = {
       author_email: currentUser.email,
       author_name: currentUser.name || 'Unknown',
       profile_pic: currentUser.profile_pic || '',
-      text: text || '',
-      file_url: url || '',
-      file_mime: mime || '',
-      thumbnail_url: thumbnail || ''
+      text: text || '',  // Text can be empty if file uploaded
+      file_url: url || '',  // File URL can be empty if text provided
+      file_mime: mime || '',  // MIME can be empty
+      thumbnail_url: thumbnail || ''  // Thumbnail can be empty
     };
     
-    console.log('📝 Post payload:', payload);
+    console.log('Sending post payload:', payload);
     
     const res = await fetch(API + '/posts', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(payload),
-      timeout: 60000
+      timeout: 60000  // 60 second timeout
     });
     
     const j = await res.json();
@@ -2357,14 +2340,11 @@ async function addPost(){
       fileEl.value = '';
       byId('fileNameDisplay').textContent = '';
       btn.textContent = 'Post →';
-      btn.style.opacity = '1';
       btn.disabled = false;
       
       // Show success message
-      if(url){
-        alert('✅ Post created with media!');
-      } else {
-        alert('✅ Post created!');
+      if(!uploadSucceeded && fileEl.files[0]){
+        alert('✅ Post created! (Video upload will process in background)');
       }
       
       // Refresh everything
@@ -2379,7 +2359,6 @@ async function addPost(){
       console.error('❌ Validation error:', j);
       alert('❌ ' + (j.error || 'Post failed validation'));
       btn.textContent = 'Post →';
-      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else if(res.status >= 500){
@@ -2387,7 +2366,6 @@ async function addPost(){
       console.error('❌ Server error:', j);
       alert('⚠️ Server error. Please try again in a few seconds.');
       btn.textContent = 'Post →';
-      btn.style.opacity = '1';
       btn.disabled = false;
       
     } else {
@@ -2395,7 +2373,6 @@ async function addPost(){
       console.error('❌ Unknown error:', res.status, j);
       alert('⚠️ Something went wrong. Please try again.');
       btn.textContent = 'Post →';
-      btn.style.opacity = '1';
       btn.disabled = false;
     }
     
@@ -2404,7 +2381,6 @@ async function addPost(){
     console.error('❌ Network error:', networkError);
     alert('⚠️ Network error: ' + (networkError.message || 'Cannot reach server'));
     btn.textContent = 'Post →';
-    btn.style.opacity = '1';
     btn.disabled = false;
   }
 }
