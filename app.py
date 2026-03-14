@@ -2372,8 +2372,10 @@ async function addPost(){
       btn.disabled = false;
       
       // Show success message
-      if(!uploadSucceeded && fileEl.files[0]){
-        alert('✅ Post created! (Video upload will process in background)');
+      if(url){
+        alert('✅ Post created with media!');
+      } else {
+        alert('✅ Post created!');
       }
       
       // Refresh everything
